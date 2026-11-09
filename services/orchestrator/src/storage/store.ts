@@ -14,10 +14,21 @@ export class Store {
   private db: DatabaseSync;
   constructor(db: DatabaseSync) { this.db = db; }
 
+  // Live subscribers (the SSE endpoint). Events are announced only AFTER the transaction that wrote
+  // them commits, so a rolled-back change is never shown to a viewer.
+  private listeners = new Set<(e: T.DomainEvent) => void>();
+  private pending: T.DomainEvent[] | null = null;
+  subscribe(fn: (e: T.DomainEvent) => void): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  private announce(e: T.DomainEvent) { for (const l of this.listeners) { try { l(e); } catch { /* a broken subscriber must not break writes */ } } }
+
   private tx<R>(fn: () => R): R {
     this.db.exec('BEGIN IMMEDIATE');
-    try { const r = fn(); this.db.exec('COMMIT'); return r; }
-    catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    this.pending = [];
+    try {
+      const r = fn(); this.db.exec('COMMIT');
+      const out = this.pending; this.pending = null; out.forEach((e) => this.announce(e));
+      return r;
+    } catch (e) { this.pending = null; this.db.exec('ROLLBACK'); throw e; }
   }
   private one<R>(sql: string, ...a: any[]): R | undefined { return this.db.prepare(sql).get(...a) as R | undefined; }
   private all<R>(sql: string, ...a: any[]): R[] { return this.db.prepare(sql).all(...a) as R[]; }
@@ -112,6 +123,10 @@ export class Store {
       cliSessionId: r.cli_session_id, status: r.status, exitCode: r.exit_code, terminationReason: r.termination_reason,
       startedAt: r.started_at, endedAt: r.ended_at, idempotencyKey: r.idempotency_key };
   }
+  listRunsForSession(sessionId: string): T.AgentRun[] {
+    return this.all<{ id: string }>('SELECT r.id FROM agent_run r JOIN task t ON t.id=r.task_id WHERE t.session_id=? ORDER BY r.rowid', sessionId)
+      .map((r) => this.getRun(r.id)!);
+  }
   latestRunIdForSession(sessionId: string): string | undefined {
     return this.one<{ id: string }>('SELECT r.id FROM agent_run r JOIN task t ON t.id=r.task_id WHERE t.session_id=? ORDER BY r.rowid DESC LIMIT 1', sessionId)?.id;
   }
@@ -171,7 +186,9 @@ export class Store {
     const row = this.one<{ m: number | null }>('SELECT MAX(seq) AS m FROM event WHERE session_id=?', i.sessionId);
     const seq = (row?.m ?? 0) + 1, id = newId('evt'), t = now(), payload = redact(i.payload ?? {});
     this.db.prepare('INSERT INTO event VALUES (?,?,?,?,?,?,?)').run(id, i.sessionId, seq, i.type, i.runId ?? null, j(payload), t);
-    return { id, sessionId: i.sessionId, seq, type: i.type, runId: i.runId ?? null, payload, createdAt: t };
+    const ev: T.DomainEvent = { id, sessionId: i.sessionId, seq, type: i.type, runId: i.runId ?? null, payload, createdAt: t };
+    if (this.pending) this.pending.push(ev); else this.announce(ev);
+    return ev;
   }
   listEvents(sessionId: string, afterSeq = 0): T.DomainEvent[] {
     return this.all<any>('SELECT * FROM event WHERE session_id=? AND seq>? ORDER BY seq', sessionId, afterSeq)

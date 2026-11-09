@@ -1,5 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { readFileSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import type { Store } from '../storage/store.ts';
+import type { DomainEvent } from '../domain/types.ts';
+import { snapshot } from '../checkpoints/git.ts';
 import { IdempotencyConflictError, SessionBusyError, WorktreeBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
 import { InvalidTransitionError } from '../domain/states.ts';
 import { ResumeError, ResumeService } from '../checkpoints/resume-service.ts';
@@ -29,10 +33,23 @@ const str = (v: unknown, name: string): string => {
   return v;
 };
 
+const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?$/;
+const FILE_CAP = 200 * 1024;
+
+export interface ApiOptions {
+  /** Browser origins allowed to call this API directly. Default none: the dashboard reaches us server-to-server. */
+  allowedOrigins?: string[];
+}
+
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
 // Security: callers cannot choose the working directory. A run always executes in the project's repo.
-export function createApi(store: Store, supervisor: Supervisor): Server {
+export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions = {}): Server {
+  const allowedOrigins = new Set(opts.allowedOrigins ?? []);
   const checkpoints = supervisor.checkpoints;
+  const workdir = (sessionId: string) => {
+    const s = store.getSession(sessionId)!;
+    return s.worktreePath ?? store.getProject(s.projectId)!.repoPath;
+  };
   const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints) : undefined;
   const send = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
@@ -45,7 +62,76 @@ export function createApi(store: Store, supervisor: Supervisor): Server {
       const m = req.method ?? 'GET';
       const need = <X>(v: X | undefined, what: string): X => { if (v === undefined) throw new HttpError(404, `${what} not found`); return v; };
 
+      // ---- request guard. Any web page can make a browser send requests to 127.0.0.1, so:
+      //  * Host must be a loopback name (blocks DNS-rebinding),
+      //  * a browser-supplied Origin must be explicitly allowed (blocks cross-site POSTs),
+      //  * bodies must be application/json (a cross-site form or no-cors fetch cannot send that).
+      if (!LOCAL_HOST.test(req.headers.host ?? '')) throw new HttpError(403, 'host not allowed');
+      const origin = req.headers.origin;
+      if (origin !== undefined && !allowedOrigins.has(origin)) throw new HttpError(403, 'origin not allowed');
+      const hasBody = (req.headers['content-length'] ?? '0') !== '0' || req.headers['transfer-encoding'] !== undefined;
+      if (m !== 'GET' && m !== 'HEAD' && hasBody && !/^application\/json\b/i.test(req.headers['content-type'] ?? ''))
+        throw new HttpError(415, 'content-type must be application/json');
+
       if (m === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true });
+
+      // ---- listings for the dashboard
+      if (m === 'GET' && url.pathname === '/projects') return send(res, 200, store.listProjects());
+      if (m === 'GET' && url.pathname === '/sessions') {
+        return send(res, 200, store.listSessions().reverse().map((s) => {
+          const runId = store.latestRunIdForSession(s.id); const run = runId ? store.getRun(runId) : undefined;
+          return { session: s, project: { id: s.projectId, name: store.getProject(s.projectId)?.name ?? '?' },
+            latestRun: run ? { id: run.id, status: run.status, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt } : null,
+            taskCount: store.listTasks(s.id).length };
+        }));
+      }
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'runs') {
+        need(store.getSession(parts[1]), 'session'); return send(res, 200, store.listRunsForSession(parts[1]));
+      }
+
+      // Live event stream (Server-Sent Events). Replays from ?after= (or Last-Event-ID) and then follows.
+      // Replay is synchronous, so no event can slip between "replayed" and "subscribed".
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'stream') {
+        const sessionId = need(store.getSession(parts[1]), 'session').id;
+        let last = Number(url.searchParams.get('after') ?? req.headers['last-event-id'] ?? 0) || 0;
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+        res.write('retry: 2000\n\n');
+        const write = (e: DomainEvent) => { if (e.seq > last) { last = e.seq; res.write(`id: ${e.seq}\nevent: session-event\ndata: ${JSON.stringify(e)}\n\n`); } };
+        for (const e of store.listEvents(sessionId, last)) write(e);
+        const unsubscribe = store.subscribe((e) => { if (e.sessionId === sessionId) write(e); });
+        const beat = setInterval(() => res.write(': ping\n\n'), 15_000);
+        req.on('close', () => { clearInterval(beat); unsubscribe(); });
+        return;
+      }
+
+      // Live repository state for the session: changed files + unified diff (computed now, read-only).
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'changes') {
+        const sessionId = need(store.getSession(parts[1]), 'session').id;
+        const snap = snapshot(workdir(sessionId));
+        const cp = store.latestCheckpoint(sessionId);
+        const untracked = new Set(snap.untracked);
+        return send(res, 200, {
+          available: snap.available, branch: snap.branch ?? null, revision: snap.revision ?? null, status: snap.status,
+          files: snap.changedFiles.map((path) => ({ path, untracked: untracked.has(path) })),
+          diff: snap.diff, diffTruncated: snap.diffTruncated, computedAt: new Date().toISOString(),
+          checkpoint: cp ? { id: cp.id, seq: cp.seq, createdAt: cp.createdAt, matchesNow: (cp.data as any).fingerprint === snap.fingerprint } : null,
+        });
+      }
+      // Content of ONE changed file (for untracked files, which a diff cannot show).
+      // The path must be one git itself reports as changed, so this cannot be used to read arbitrary files.
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'file') {
+        const sessionId = need(store.getSession(parts[1]), 'session').id;
+        const wanted = url.searchParams.get('path') ?? '';
+        const dir = workdir(sessionId); const snap = snapshot(dir);
+        if (!snap.changedFiles.includes(wanted)) throw new HttpError(404, 'not a changed file in this session');
+        const full = resolve(dir, wanted);
+        if (!full.startsWith(resolve(dir) + sep)) throw new HttpError(400, 'path escapes the working directory');
+        let size: number; try { size = statSync(full).size; } catch { throw new HttpError(404, 'file no longer exists'); }
+        if (size > FILE_CAP) throw new HttpError(413, `file is larger than ${FILE_CAP} bytes`);
+        const buf = readFileSync(full);
+        if (buf.subarray(0, 8000).includes(0)) throw new HttpError(415, 'binary file');
+        return send(res, 200, { path: wanted, size, content: buf.toString('utf8') });
+      }
 
       if (m === 'POST' && url.pathname === '/projects') {
         const b = await readJson(req);
@@ -110,7 +196,12 @@ export function createApi(store: Store, supervisor: Supervisor): Server {
       }
       if (parts[0] === 'runs' && parts.length === 2 && m === 'GET') {
         const r = need(supervisor.status(parts[1]), 'run');
-        return send(res, 200, { ...r, active: supervisor.isActive(r.id) });
+        const task = store.getTask(r.taskId)!;
+        const resultEvent = store.listEvents(task.sessionId).find((e) => e.runId === r.id && e.type === 'agent.result');
+        const costUsd = resultEvent?.payload.costUsd;
+        return send(res, 200, { ...r, active: supervisor.isActive(r.id), sessionId: task.sessionId,
+          usage: typeof costUsd === 'number' ? { costUsd, source: 'reported' } : { source: 'unavailable' },
+          artifacts: store.listArtifacts(task.sessionId).filter((a) => a.runId === r.id).map((a) => ({ id: a.id, kind: a.kind, createdAt: a.createdAt, bytes: a.content?.length ?? 0 })) });
       }
       if (m === 'POST' && parts[0] === 'runs' && parts[2] === 'cancel') {
         need(supervisor.status(parts[1]), 'run');

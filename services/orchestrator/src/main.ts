@@ -22,7 +22,9 @@ const supervisor = new Supervisor(store, adapter, {
   checkpointIntervalMs: process.env.ORCH_CHECKPOINT_INTERVAL_MS ? Number(process.env.ORCH_CHECKPOINT_INTERVAL_MS) : undefined,
 });
 
-const server = createApi(store, supervisor);
+// ORCH_ALLOWED_ORIGINS: comma-separated browser origins allowed to call the API directly (default none;
+// the dashboard's server talks to us without an Origin header).
+const server = createApi(store, supervisor, { allowedOrigins: process.env.ORCH_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) });
 // Binding the port doubles as the single-instance lock. Orphan recovery runs only AFTER it succeeds:
 // a second instance must never mark the first instance's live runs as orphaned.
 server.on('error', (e: NodeJS.ErrnoException) => {
@@ -39,6 +41,7 @@ const stop = async () => {
   if (stopping) return; stopping = true;
   console.log('shutting down: stopping workers');
   server.close();
+  server.closeAllConnections(); // open event streams would otherwise keep the server alive
   await supervisor.shutdown();
   db.close(); // an open handle keeps the WAL files locked on Windows
   process.exit(0);
