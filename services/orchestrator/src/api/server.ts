@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Store } from '../storage/store.ts';
-import { SessionBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
+import { IdempotencyConflictError, SessionBusyError, WorktreeBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
 import { InvalidTransitionError } from '../domain/states.ts';
+import { ResumeError, ResumeService } from '../checkpoints/resume-service.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
 
@@ -17,6 +18,12 @@ async function readJson(req: IncomingMessage): Promise<any> {
   if (!size) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'invalid JSON'); }
 }
+const idemKey = (req: IncomingMessage): string | undefined => {
+  const k = req.headers['idempotency-key'];
+  if (k === undefined) return undefined;
+  if (typeof k !== 'string' || !/^[A-Za-z0-9._:-]{8,128}$/.test(k)) throw new HttpError(400, 'Idempotency-Key must be 8-128 chars of [A-Za-z0-9._:-]');
+  return k;
+};
 const str = (v: unknown, name: string): string => {
   if (typeof v !== 'string' || !v.trim()) throw new HttpError(400, `${name} is required`);
   return v;
@@ -25,6 +32,8 @@ const str = (v: unknown, name: string): string => {
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
 // Security: callers cannot choose the working directory. A run always executes in the project's repo.
 export function createApi(store: Store, supervisor: Supervisor): Server {
+  const checkpoints = supervisor.checkpoints;
+  const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints) : undefined;
   const send = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
   };
@@ -69,7 +78,35 @@ export function createApi(store: Store, supervisor: Supervisor): Server {
           : `${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`;
         const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
         if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
-        return send(res, 202, supervisor.start({ taskId: task.id, prompt, cwd: project.repoPath, model, timeoutMs }));
+        return send(res, 202, supervisor.start({ taskId: task.id, prompt, cwd: project.repoPath, model, timeoutMs, idempotencyKey: idemKey(req) }));
+      }
+      if (m === 'GET' && url.pathname === '/worktree-locks') return send(res, 200, store.listWorktreeLocks());
+
+      // ---- checkpoints, pause, resume
+      if (parts[0] === 'sessions' && ['checkpoint', 'resume-check', 'resume', 'pause'].includes(parts[2])) {
+        const session = need(store.getSession(parts[1]), 'session');
+        if (parts[2] === 'pause' && m === 'POST') {
+          const r = await supervisor.pauseSession(session.id);
+          if (!r) throw new HttpError(409, 'session has no active run to pause');
+          return send(res, 200, { run: r, session: store.getSession(session.id) });
+        }
+        if (!checkpoints || !resumer) throw new HttpError(501, 'checkpoints are not enabled');
+        if (parts[2] === 'checkpoint' && m === 'GET') return send(res, 200, need(checkpoints.latest(session.id), 'checkpoint'));
+        if (parts[2] === 'checkpoint' && m === 'POST') {
+          const b = await readJson(req);
+          return send(res, 201, checkpoints.capture({ sessionId: session.id, reason: 'manual',
+            nextAction: typeof b.nextAction === 'string' && b.nextAction.trim() ? b.nextAction : 'Continue the task.' }));
+        }
+        if (parts[2] === 'resume-check' && m === 'GET') return send(res, 200, resumer.check(session.id));
+        if (parts[2] === 'resume' && m === 'POST') {
+          const b = await readJson(req);
+          const model = str(b.model, 'model'); if (!MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+          if (b.mode !== undefined && !['portable', 'native'].includes(b.mode)) throw new HttpError(400, 'mode must be portable or native');
+          const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
+          if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
+          const r = resumer.resume(session.id, { model, mode: b.mode, timeoutMs, idempotencyKey: idemKey(req) });
+          return send(res, r.replayed ? 200 : 202, r);
+        }
       }
       if (parts[0] === 'runs' && parts.length === 2 && m === 'GET') {
         const r = need(supervisor.status(parts[1]), 'run');
@@ -89,7 +126,8 @@ export function createApi(store: Store, supervisor: Supervisor): Server {
       throw new HttpError(404, 'not found');
     } catch (e: any) {
       if (e instanceof HttpError) return send(res, e.status, { error: e.message });
-      if (e instanceof SessionBusyError) return send(res, 409, { error: e.message });
+      if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError) return send(res, 409, { error: e.message });
+      if (e instanceof ResumeError) return send(res, 409, { error: e.message, drift: e.drift });
       if (e instanceof InvalidTransitionError) return send(res, 409, { error: e.message });
       if (/cannot be started/.test(e?.message)) return send(res, 409, { error: e.message });
       console.error(e); return send(res, 500, { error: 'internal error' });

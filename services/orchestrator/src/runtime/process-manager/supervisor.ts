@@ -1,14 +1,23 @@
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { canTransition, type WorkState } from '../../domain/states.ts';
 import type { AgentRun } from '../../domain/types.ts';
+import type { CheckpointService } from '../../checkpoints/checkpoint-service.ts';
 import type { Store } from '../../storage/store.ts';
 import type { AdapterProcess, NormalizedEvent, ProviderAdapter } from '../adapters/types.ts';
 
 export interface StartInput {
   taskId: string; prompt: string; cwd: string; model: string;
   role?: string; timeoutMs?: number; resumeId?: string;
+  /** A retried request with the same key returns the original run instead of starting another. */
+  idempotencyKey?: string;
 }
-export interface SupervisorOptions { defaultTimeoutMs?: number; logCapBytes?: number }
+export interface SupervisorOptions {
+  defaultTimeoutMs?: number; logCapBytes?: number;
+  checkpoints?: CheckpointService;
+  /** Minimum gap between mid-run checkpoints. 0 = after every successful tool call. Default 5000. */
+  checkpointIntervalMs?: number;
+}
 
 interface Active {
   runId: string; sessionId: string; proc: AdapterProcess;
@@ -17,48 +26,75 @@ interface Active {
 }
 
 export class SessionBusyError extends Error {}
+export class WorktreeBusyError extends Error {}
+export class IdempotencyConflictError extends Error {}
 
 const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
+// Normalised so "C:\Repo", "c:/repo/" and "C:\Repo\" are the same lock on Windows.
+const lockKey = (cwd: string) => { const p = resolve(cwd).replace(/[\\/]+$/, ''); return process.platform === 'win32' ? p.toLowerCase() : p; };
 
 // Owns the lifecycle of agent processes and is the only thing that writes run outcomes.
 // Rule: a run is `completed` only when the process exited 0 AND the provider reported a successful
 // result. A started process, or a final-looking message, is never treated as success.
 export class Supervisor {
+  readonly checkpoints?: CheckpointService;
   private store: Store; private adapter: ProviderAdapter;
-  private defaultTimeoutMs: number; private logCap: number;
+  private defaultTimeoutMs: number; private logCap: number; private cpInterval: number;
   private active = new Map<string, Active>();
 
   constructor(store: Store, adapter: ProviderAdapter, opts: SupervisorOptions = {}) {
     this.store = store; this.adapter = adapter;
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 10 * 60_000;
     this.logCap = opts.logCapBytes ?? 5 * 1024 * 1024;
+    this.checkpoints = opts.checkpoints; this.cpInterval = opts.checkpointIntervalMs ?? 5000;
   }
 
   /** Starts a run and returns once it is `running`. Use waitFor() to await the final state. */
   start(input: StartInput): AgentRun {
     const task = this.store.getTask(input.taskId); if (!task) throw new Error(`task not found: ${input.taskId}`);
     const session = this.store.getSession(task.sessionId)!;
+
+    if (input.idempotencyKey) {
+      const prior = this.store.getRunByKey(input.idempotencyKey);
+      if (prior) {
+        if (prior.taskId !== task.id) throw new IdempotencyConflictError(`idempotency key already used for a different task`);
+        return prior;
+      }
+    }
     for (const a of this.active.values())
       if (a.sessionId === session.id) throw new SessionBusyError(`session ${session.id} already has an active run (${a.runId})`);
+
+    // One writer per working directory, even across sessions. Checked before any state is changed.
+    const lockPath = lockKey(input.cwd);
+    const holder = this.store.getWorktreeLock(lockPath);
+    if (holder) {
+      if (this.store.getRun(holder.runId)?.status === 'running') throw new WorktreeBusyError(`working directory is in use by run ${holder.runId} (session ${holder.sessionId})`);
+      this.store.releaseWorktreeLocksForRun(holder.runId); // stale lock left by a run that already ended
+    }
 
     // Bring session and task to `running`; terminal states cannot be restarted.
     this.activate(session.status, (to) => this.store.transitionSession(session.id, to), 'session');
     this.activate(task.status, (to) => this.store.transitionTask(task.id, to), 'task');
 
     const cliSessionId = input.resumeId ?? randomUUID();
-    const run = this.store.createRun({ taskId: task.id, role: input.role ?? 'coder', provider: this.adapter.provider, model: input.model });
+    const run = this.store.createRun({ taskId: task.id, role: input.role ?? 'coder', provider: this.adapter.provider, model: input.model, idempotencyKey: input.idempotencyKey });
+    if (this.store.acquireWorktreeLock(lockPath, session.id, run.id)) throw new WorktreeBusyError('working directory lock was taken concurrently');
+
+    // Persist state BEFORE launching work, so a crash right after launch is still recoverable.
+    this.checkpoint(session.id, run.id, input.cwd, 'before-launch', `Start the task: ${task.description}`);
 
     let proc: AdapterProcess;
     try { proc = this.adapter.launch({ cwd: input.cwd, prompt: input.prompt, model: input.model, cliSessionId, resumeId: input.resumeId }); }
     catch (e: any) {
       this.store.transitionRun(run.id, 'running', { cliSessionId });
-      this.settle(run.id, 'failed', { reason: `launch error: ${e.message}` });
+      this.settle(run.id, 'failed', { reason: `launch error: ${e.message}` }, input.cwd);
       return this.store.getRun(run.id)!;
     }
     this.store.transitionRun(run.id, 'running', { pid: proc.pid, cliSessionId });
 
     const entry: Active = { runId: run.id, sessionId: session.id, proc, cancelled: false, timedOut: false, finished: undefined as any };
     const log: string[] = []; let logBytes = 0; let truncated = false; let result: Extract<NormalizedEvent, { kind: 'result' }> | undefined;
+    let lastCp = Date.now();
     const addLog = (s: string) => {
       if (logBytes >= this.logCap) { truncated = true; return; }
       log.push(s); logBytes += Buffer.byteLength(s);
@@ -69,7 +105,14 @@ export class Supervisor {
       const sessionId = session.id;
       if (ev.kind === 'init') this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.init', payload: { model: ev.model, providerSessionId: ev.providerSessionId } });
       else if (ev.kind === 'assistant') this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.message', payload: { text: ev.text.slice(0, 2000), tools: ev.tools } });
-      else if (ev.kind === 'tool_result') this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.tool_result', payload: { isError: ev.isError, summary: ev.summary } });
+      else if (ev.kind === 'tool_result') {
+        this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.tool_result', payload: { isError: ev.isError, summary: ev.summary } });
+        // Mid-run checkpoint after a successful tool call (throttled), so a crash loses little work.
+        if (!ev.isError && Date.now() - lastCp >= this.cpInterval) {
+          lastCp = Date.now();
+          this.checkpoint(sessionId, run.id, input.cwd, 'progress', `Continue the task: ${task.description}`);
+        }
+      }
       else if (ev.kind === 'result') { result = ev; this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.result', payload: { ok: ev.ok, text: ev.text.slice(0, 2000), costUsd: ev.costUsd } }); }
       // `other` events (hooks, token counters, rate limits) stay in the log artifact only.
     });
@@ -90,7 +133,7 @@ export class Supervisor {
       else if (!result) { to = 'failed'; reason = 'exited 0 without a result event'; }
       else { to = 'failed'; reason = 'provider reported an error result'; }
       this.store.addArtifact({ sessionId: session.id, runId: run.id, kind: 'log', content: log.join('') });
-      const done = this.settle(run.id, to, { exitCode: exit.exitCode ?? undefined, reason });
+      const done = this.settle(run.id, to, { exitCode: exit.exitCode ?? undefined, reason }, input.cwd);
       this.active.delete(run.id);
       return done;
     });
@@ -100,6 +143,7 @@ export class Supervisor {
 
   status(runId: string) { return this.store.getRun(runId); }
   isActive(runId: string) { return this.active.has(runId); }
+  findByKey(key: string) { return this.store.getRunByKey(key); }
   waitFor(runId: string): Promise<AgentRun> {
     const a = this.active.get(runId);
     return a ? a.finished : Promise.resolve(this.store.getRun(runId)!);
@@ -113,13 +157,20 @@ export class Supervisor {
     return a.finished;
   }
 
+  /** Pauses a session: stops its active run (a checkpoint is saved) and leaves the session `paused`. */
+  async pauseSession(sessionId: string): Promise<AgentRun | undefined> {
+    const a = [...this.active.values()].find((x) => x.sessionId === sessionId);
+    return a ? this.cancel(a.runId, 'paused by user') : undefined;
+  }
+
   /** Graceful application shutdown: stop every worker so none is left running unsupervised. */
   async shutdown() { await Promise.all([...this.active.keys()].map((id) => this.cancel(id, 'application shutdown'))); }
 
   /**
    * Run at startup. Any run still `running` in the database but not owned by this process was left
-   * behind by a crash or restart. It is marked failed (never assumed to have succeeded). A process
-   * that is still alive is reported but not killed: the pid may have been reused by something else.
+   * behind by a crash or restart. It is marked failed (never assumed to have succeeded), its worktree
+   * lock is released and a checkpoint of the repository as it is NOW is saved, so the session can be
+   * resumed. A process that is still alive is reported but not killed: the pid may have been reused.
    */
   recoverOrphans(): { runId: string; pid: number | null; stillAlive: boolean }[] {
     const out: { runId: string; pid: number | null; stillAlive: boolean }[] = [];
@@ -129,6 +180,8 @@ export class Supervisor {
       this.settle(r.id, 'failed', { reason: `orphaned: supervisor restarted (pid ${r.pid ?? 'unknown'} ${stillAlive ? 'is still alive and was NOT killed' : 'is not running'})` });
       out.push({ runId: r.id, pid: r.pid, stillAlive });
     }
+    for (const l of this.store.listWorktreeLocks()) // locks whose run is no longer running
+      if (this.store.getRun(l.runId)?.status !== 'running') this.store.releaseWorktreeLocksForRun(l.runId);
     return out;
   }
 
@@ -140,11 +193,21 @@ export class Supervisor {
     move('running');
   }
 
-  // Writes the run outcome, then mirrors it onto the task and session.
+  // A checkpoint problem must never fail or hide a run: record it and carry on.
+  private checkpoint(sessionId: string, runId: string, cwd: string | undefined, reason: string, nextAction: string) {
+    if (!this.checkpoints) return;
+    try { this.checkpoints.capture({ sessionId, runId, cwd, reason, nextAction }); }
+    catch (e: any) {
+      try { this.store.appendEvent({ sessionId, runId, type: 'checkpoint.failed', payload: { reason, error: String(e?.message ?? e).slice(0, 300) } }); } catch { /* nothing more to do */ }
+    }
+  }
+
+  // Writes the run outcome, mirrors it onto the task and session, releases the worktree lock,
+  // then saves a checkpoint of the final state.
   //   completed -> task completed; session completed once every task is completed
   //   failed    -> task failed;    session failed
-  //   cancelled -> task paused;    session paused   (resumable in Phase 3)
-  private settle(runId: string, to: 'completed' | 'failed' | 'cancelled', info: { exitCode?: number; reason: string }): AgentRun {
+  //   cancelled -> task paused;    session paused   (resumable)
+  private settle(runId: string, to: 'completed' | 'failed' | 'cancelled', info: { exitCode?: number; reason: string }, cwd?: string): AgentRun {
     const run = this.store.transitionRun(runId, to, info);
     const task = this.store.getTask(run.taskId)!;
     const taskTo: WorkState = to === 'cancelled' ? 'paused' : to;
@@ -155,6 +218,12 @@ export class Supervisor {
     else if (to === 'failed') sessionTo = 'failed';
     else if (this.store.listTasks(session.id).every((t) => t.status === 'completed')) sessionTo = 'completed';
     if (sessionTo && canTransition(session.status, sessionTo)) this.store.transitionSession(session.id, sessionTo, info.reason);
+
+    this.store.releaseWorktreeLocksForRun(runId);
+    const next = to === 'completed' ? 'The task finished. Review the diff and run the checks.'
+      : to === 'failed' ? `The previous attempt failed (${info.reason}). Inspect the repository, then retry the task.`
+      : 'The run was paused. Inspect the repository, then continue the task.';
+    this.checkpoint(session.id, runId, cwd, `run-${to}`, next);
     return run;
   }
 }

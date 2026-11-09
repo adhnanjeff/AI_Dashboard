@@ -97,11 +97,11 @@ export class Store {
   }
 
   // ---- agent runs
-  createRun(i: { taskId: string; role: string; provider: string; model: string }): T.AgentRun {
+  createRun(i: { taskId: string; role: string; provider: string; model: string; idempotencyKey?: string }): T.AgentRun {
     return this.tx(() => {
       const id = newId('run'), tk = this.getTask(i.taskId); if (!tk) throw new Error(`task not found: ${i.taskId}`);
-      this.db.prepare("INSERT INTO agent_run (id,task_id,role,provider,model,status) VALUES (?,?,?,?,?, 'queued')")
-        .run(id, i.taskId, i.role, i.provider, i.model);
+      this.db.prepare("INSERT INTO agent_run (id,task_id,role,provider,model,status,idempotency_key) VALUES (?,?,?,?,?, 'queued', ?)")
+        .run(id, i.taskId, i.role, i.provider, i.model, i.idempotencyKey ?? null);
       this.appendEvent({ sessionId: tk.sessionId, runId: id, type: 'run.created', payload: { role: i.role, model: i.model } });
       return this.getRun(id)!;
     });
@@ -110,7 +110,41 @@ export class Store {
     const r = this.one<any>('SELECT * FROM agent_run WHERE id=?', id);
     return r && { id: r.id, taskId: r.task_id, role: r.role, provider: r.provider, model: r.model, pid: r.pid,
       cliSessionId: r.cli_session_id, status: r.status, exitCode: r.exit_code, terminationReason: r.termination_reason,
-      startedAt: r.started_at, endedAt: r.ended_at };
+      startedAt: r.started_at, endedAt: r.ended_at, idempotencyKey: r.idempotency_key };
+  }
+  latestRunIdForSession(sessionId: string): string | undefined {
+    return this.one<{ id: string }>('SELECT r.id FROM agent_run r JOIN task t ON t.id=r.task_id WHERE t.session_id=? ORDER BY r.rowid DESC LIMIT 1', sessionId)?.id;
+  }
+  getRunByKey(key: string): T.AgentRun | undefined {
+    const r = this.one<{ id: string }>('SELECT id FROM agent_run WHERE idempotency_key=?', key);
+    return r && this.getRun(r.id);
+  }
+
+  // ---- worktree locks (one writer per working directory)
+  getWorktreeLock(path: string): T.WorktreeLock | undefined {
+    const r = this.one<any>('SELECT * FROM worktree_lock WHERE path=?', path);
+    return r && { path: r.path, sessionId: r.session_id, runId: r.run_id, acquiredAt: r.acquired_at };
+  }
+  /** Returns the current holder if the path is already locked, otherwise takes the lock and returns undefined. */
+  acquireWorktreeLock(path: string, sessionId: string, runId: string): T.WorktreeLock | undefined {
+    try {
+      this.db.prepare('INSERT INTO worktree_lock VALUES (?,?,?,?)').run(path, sessionId, runId, now());
+      this.appendEvent({ sessionId, runId, type: 'worktree.locked', payload: { path } });
+      return undefined;
+    } catch (e: any) {
+      const holder = this.getWorktreeLock(path);
+      if (holder) return holder;
+      throw e;
+    }
+  }
+  releaseWorktreeLocksForRun(runId: string) {
+    const held = this.all<any>('SELECT * FROM worktree_lock WHERE run_id=?', runId);
+    this.db.prepare('DELETE FROM worktree_lock WHERE run_id=?').run(runId);
+    for (const h of held) this.appendEvent({ sessionId: h.session_id, runId, type: 'worktree.unlocked', payload: { path: h.path } });
+  }
+  listWorktreeLocks(): T.WorktreeLock[] {
+    return this.all<any>('SELECT * FROM worktree_lock ORDER BY acquired_at')
+      .map((r) => ({ path: r.path, sessionId: r.session_id, runId: r.run_id, acquiredAt: r.acquired_at }));
   }
   listRuns(status?: WorkState): T.AgentRun[] {
     const rows = status ? this.all<any>('SELECT id FROM agent_run WHERE status=?', status) : this.all<any>('SELECT id FROM agent_run');
@@ -155,6 +189,10 @@ export class Store {
       this.appendEvent({ sessionId: i.sessionId, type: 'checkpoint.saved', payload: { checkpointId: id, seq } });
       return this.latestCheckpoint(i.sessionId)!;
     });
+  }
+  listCheckpoints(sessionId: string): T.Checkpoint[] {
+    return this.all<any>('SELECT * FROM checkpoint WHERE session_id=? ORDER BY seq', sessionId).map((r) => ({
+      id: r.id, sessionId: r.session_id, seq: r.seq, nextAction: r.next_action, gitState: p(r.git_state), data: p(r.data), createdAt: r.created_at }));
   }
   latestCheckpoint(sessionId: string): T.Checkpoint | undefined {
     const r = this.one<any>('SELECT * FROM checkpoint WHERE session_id=? ORDER BY seq DESC LIMIT 1', sessionId);

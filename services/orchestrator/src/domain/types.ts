@@ -16,7 +16,9 @@ export interface AgentRun {
   id: string; taskId: string; role: string; provider: string; model: string;
   pid: number | null; cliSessionId: string | null; status: WorkState;
   exitCode: number | null; terminationReason: string | null; startedAt: string | null; endedAt: string | null;
+  idempotencyKey: string | null;
 }
+export interface WorktreeLock { path: string; sessionId: string; runId: string; acquiredAt: string }
 export interface DomainEvent {
   id: string; sessionId: string; seq: number; type: string; runId: string | null;
   payload: Record<string, unknown>; createdAt: string;

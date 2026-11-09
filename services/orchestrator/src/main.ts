@@ -6,6 +6,7 @@ import { openDb } from './storage/db.ts';
 import { Store } from './storage/store.ts';
 import { ClaudeCliAdapter } from './runtime/adapters/claude-cli.ts';
 import { Supervisor } from './runtime/process-manager/supervisor.ts';
+import { CheckpointService } from './checkpoints/checkpoint-service.ts';
 import { createApi } from './api/server.ts';
 
 const dbPath = resolve(process.env.DB_PATH ?? '.sandbox/orchestrator.db');
@@ -14,7 +15,12 @@ mkdirSync(dirname(dbPath), { recursive: true });
 
 const db = openDb(dbPath);
 const store = new Store(db);
-const supervisor = new Supervisor(store, new ClaudeCliAdapter());
+// CLAUDE_BIN / ORCH_CLAUDE_ARGS (JSON array) point the adapter at a different executable, e.g. a test double.
+const adapter = new ClaudeCliAdapter({ command: process.env.CLAUDE_BIN, baseArgs: process.env.ORCH_CLAUDE_ARGS ? JSON.parse(process.env.ORCH_CLAUDE_ARGS) : undefined });
+const supervisor = new Supervisor(store, adapter, {
+  checkpoints: new CheckpointService(store),
+  checkpointIntervalMs: process.env.ORCH_CHECKPOINT_INTERVAL_MS ? Number(process.env.ORCH_CHECKPOINT_INTERVAL_MS) : undefined,
+});
 
 const server = createApi(store, supervisor);
 // Binding the port doubles as the single-instance lock. Orphan recovery runs only AFTER it succeeds:
