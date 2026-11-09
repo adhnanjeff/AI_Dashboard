@@ -66,4 +66,17 @@ CREATE INDEX idx_task_session ON task(session_id);
 CREATE INDEX idx_run_task ON agent_run(task_id);
 `,
   },
+  {
+    version: 2,
+    sql: `
+-- A retried "start/resume" request with the same key returns the original run instead of starting another.
+ALTER TABLE agent_run ADD COLUMN idempotency_key TEXT;
+CREATE UNIQUE INDEX idx_run_idempotency ON agent_run(idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- At most one writer per working directory. PRIMARY KEY makes acquisition atomic.
+CREATE TABLE worktree_lock (
+  path TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id),
+  run_id TEXT NOT NULL REFERENCES agent_run(id), acquired_at TEXT NOT NULL
+);
+`,
+  },
 ];

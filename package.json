@@ -8,6 +8,10 @@
     "api": "node --no-warnings services/orchestrator/src/main.ts",
     "demo:run": "node scripts/phase2-demo.mjs run",
     "demo:cancel": "node scripts/phase2-demo.mjs cancel",
+    "demo3:start": "node scripts/phase3-demo.mjs start",
+    "demo3:pause": "node scripts/phase3-demo.mjs pause",
+    "demo3:status": "node scripts/phase3-demo.mjs status",
+    "demo3:resume": "node scripts/phase3-demo.mjs resume",
     "db:seed": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db seed",
     "db:dump": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db dump"
   }

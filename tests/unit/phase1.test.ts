@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../../services/orchestrator/src/storage/db.ts';
 import { Store } from '../../services/orchestrator/src/storage/store.ts';
+import { MIGRATIONS } from '../../services/orchestrator/src/storage/migrations.ts';
 import { seedDemo } from '../../services/orchestrator/src/storage/seed.ts';
 import { canTransition, isTerminal, WORK_STATES, InvalidTransitionError } from '../../services/orchestrator/src/domain/states.ts';
 import { redactString, redact } from '../../services/orchestrator/src/domain/redact.ts';
@@ -101,7 +102,7 @@ test('migrations are idempotent across reopen', () => {
   const dir = mkdtempSync(join(tmpdir(), 'p1-')); const path = join(dir, 'a.db');
   try {
     openDb(path).close(); const db = openDb(path);
-    assert.equal((db.prepare('SELECT COUNT(*) c FROM schema_migration').get() as any).c, 1);
+    assert.equal((db.prepare('SELECT COUNT(*) c FROM schema_migration').get() as any).c, MIGRATIONS.length);
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

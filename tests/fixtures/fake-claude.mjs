@@ -20,12 +20,21 @@ if (scenario === 'fail') { init(); process.stderr.write('boom: something broke\n
 if (scenario === 'noresult') { init(); say('I am done, trust me'); process.exit(0); }
 if (scenario === 'errresult') { init(); out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'tool failed' }); process.exit(0); }
 if (scenario === 'secret') { init(); say('using key sk-ant-api03-abcdefghijklmnopqrstuv now'); success('password=hunter2hunter2'); process.exit(0); }
-if (scenario === 'slow') {
+if (scenario === 'edit-then-hang') {
+  // Does real work in cwd (an untracked file), reports it, then hangs like a stuck or interrupted worker.
+  init(); writeFileSync('work.txt', 'precious\n'); say('writing work.txt', 'Write'); toolResult();
+  setInterval(() => {}, 1000);
+} else if (scenario === 'record-prompt') {
+  // Records exactly what it was launched with, then finishes successfully.
+  init();
+  if (process.env.FAKE_ARGS_FILE) writeFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));
+  writeFileSync('part2.txt', 'finished by resumed worker\n'); say('continuing', 'Write'); toolResult(); success(); process.exit(0);
+} else if (scenario === 'slow') {
   init();
   // A grandchild, like a tool subprocess. A correct cancel must kill it too.
   const gc = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   if (process.env.FAKE_PIDFILE) writeFileSync(process.env.FAKE_PIDFILE, String(gc.pid));
   setInterval(() => {}, 1000); // hang until killed
-} else if (!['ok', 'fail', 'noresult', 'errresult', 'secret'].includes(scenario)) {
+} else if (!['ok', 'fail', 'noresult', 'errresult', 'secret', 'edit-then-hang', 'record-prompt'].includes(scenario)) {
   console.error('unknown scenario ' + scenario); process.exit(64);
 }
