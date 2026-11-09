@@ -5,6 +5,9 @@
   "scripts": {
     "spike": "node spike/spike.ts",
     "test": "node --test --no-warnings tests/unit/*.test.ts",
+    "api": "node --no-warnings services/orchestrator/src/main.ts",
+    "demo:run": "node scripts/phase2-demo.mjs run",
+    "demo:cancel": "node scripts/phase2-demo.mjs cancel",
     "db:seed": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db seed",
     "db:dump": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db dump"
   }
