@@ -1,0 +1,11 @@
+{
+  "name": "ai-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "spike": "node spike/spike.ts",
+    "test": "node --test --no-warnings tests/unit/*.test.ts",
+    "db:seed": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db seed",
+    "db:dump": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db dump"
+  }
+}
