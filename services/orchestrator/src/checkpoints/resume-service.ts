@@ -1,6 +1,7 @@
 import type { AgentRun } from '../domain/types.ts';
 import type { Store } from '../storage/store.ts';
 import type { Supervisor } from '../runtime/process-manager/supervisor.ts';
+import type { MemoryService } from '../memory/memory-service.ts';
 import { buildResumePrompt, type CheckpointService, type Drift } from './checkpoint-service.ts';
 
 export class ResumeError extends Error {
@@ -21,9 +22,9 @@ export interface ResumeOptions {
 // Resume = verify the checkpoint against the real repository, then start a FRESH worker that is told
 // to inspect the current state before editing. It never resets or cleans anything.
 export class ResumeService {
-  private store: Store; private supervisor: Supervisor; private checkpoints: CheckpointService;
-  constructor(store: Store, supervisor: Supervisor, checkpoints: CheckpointService) {
-    this.store = store; this.supervisor = supervisor; this.checkpoints = checkpoints;
+  private store: Store; private supervisor: Supervisor; private checkpoints: CheckpointService; private memory?: MemoryService;
+  constructor(store: Store, supervisor: Supervisor, checkpoints: CheckpointService, memory?: MemoryService) {
+    this.store = store; this.supervisor = supervisor; this.checkpoints = checkpoints; this.memory = memory;
   }
 
   /** Dry run: what would resume do, and is it safe? Read-only. */
@@ -56,7 +57,9 @@ export class ResumeService {
     }
     this.store.appendEvent({ sessionId, type: 'session.resume', payload: {
       checkpointId: cp.id, mode: o.mode ?? 'portable', drift: drift.level, notes: drift.notes, checkpointEventSeq: cp.data.lastEventSeq } });
-    const run = this.supervisor.start({ taskId: task.id, prompt: buildResumePrompt(cp, drift), cwd: cp.data.cwd, model: o.model,
+    // Relevant notes only (not the whole memory), chosen by what the worker must do next.
+    const memoryBlock = this.memory?.contextFor(sessionId, `${task.description} ${task.acceptanceCriteria.join(' ')} ${cp.nextAction}`) ?? '';
+    const run = this.supervisor.start({ taskId: task.id, prompt: buildResumePrompt(cp, drift, memoryBlock), cwd: cp.data.cwd, model: o.model,
       timeoutMs: o.timeoutMs, resumeId, idempotencyKey: o.idempotencyKey });
     return { run, drift, replayed: false };
   }

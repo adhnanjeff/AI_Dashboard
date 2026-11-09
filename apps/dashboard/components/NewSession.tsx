@@ -16,6 +16,7 @@ export default function NewSession() {
   const [projName, setProjName] = useState(''); const [repoPath, setRepoPath] = useState('');
   const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [criteria, setCriteria] = useState('');
   const [model, setModel] = useState(DEFAULT_MODEL); const [startNow, setStartNow] = useState(true);
+  const [isolate, setIsolate] = useState(false);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const idemKey = useRef(newIdempotencyKey());
 
@@ -32,6 +33,7 @@ export default function NewSession() {
       const session = await api<Session>('/sessions', { method: 'POST', body: { projectId: pid, title: title.trim() } });
       const task = await api<Task>(`/sessions/${session.id}/tasks`, { method: 'POST', body: {
         description: description.trim(), acceptanceCriteria: criteria.split('\n').map((s) => s.trim()).filter(Boolean) } });
+      if (isolate) await api(`/sessions/${session.id}/worktree`, { method: 'POST', body: {} });
       if (startNow) await api(`/tasks/${task.id}/runs`, { method: 'POST', body: { model }, headers: { 'idempotency-key': idemKey.current } });
       router.push(`/sessions/${session.id}`);
     } catch (err) { setError((err as Error).message); setBusy(false); }
@@ -67,6 +69,10 @@ export default function NewSession() {
         </label>
         <label className="field">Model
           <select value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+        </label>
+        <label className="field">
+          <span className="row"><input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} /> Work in an isolated git worktree</span>
+          <span className="hint">Creates a separate branch and folder next to the repository so parallel sessions cannot overwrite each other. Needs a git repository with at least one commit.</span>
         </label>
         <label className="row"><input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} /> Start the run immediately</label>
         {error && <div className="banner bad" role="alert">{error}</div>}

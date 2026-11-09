@@ -106,7 +106,7 @@ export class CheckpointService {
 }
 
 /** The instructions a fresh worker receives. Deliberately omits the diff: the worker reads the live one itself. */
-export function buildResumePrompt(cp: { nextAction: string; data: CheckpointData }, drift: Drift): string {
+export function buildResumePrompt(cp: { nextAction: string; data: CheckpointData }, drift: Drift, memoryBlock = ''): string {
   const d = cp.data;
   const lines = [
     'You are RESUMING a task that was interrupted. You have no memory of earlier work; the repository is the source of truth.',
@@ -120,6 +120,7 @@ export function buildResumePrompt(cp: { nextAction: string; data: CheckpointData
     '',
     d.changedFiles.length ? `FILES CHANGED SO FAR (may include unfinished work): ${d.changedFiles.join(', ')}` : 'No files were changed before the interruption.',
     ...(drift.level === 'changed' ? ['', 'WARNING: the repository differs from the checkpoint:', ...drift.notes.map((n) => `- ${n}`)] : []),
+    ...(memoryBlock ? ['', memoryBlock] : []),
     '',
     'RULES:',
     '1. First inspect the real current state: read the changed files and check what exists. Do not assume the checkpoint is complete or correct.',

@@ -24,7 +24,7 @@ const supervisor = new Supervisor(store, adapter, {
 
 // ORCH_ALLOWED_ORIGINS: comma-separated browser origins allowed to call the API directly (default none;
 // the dashboard's server talks to us without an Origin header).
-const server = createApi(store, supervisor, { allowedOrigins: process.env.ORCH_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) });
+const server = createApi(store, supervisor, { worktreeRoot: process.env.ORCH_WORKTREE_ROOT, allowedOrigins: process.env.ORCH_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) });
 // Binding the port doubles as the single-instance lock. Orphan recovery runs only AFTER it succeeds:
 // a second instance must never mark the first instance's live runs as orphaned.
 server.on('error', (e: NodeJS.ErrnoException) => {

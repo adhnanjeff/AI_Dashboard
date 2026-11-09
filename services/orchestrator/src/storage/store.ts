@@ -267,6 +267,74 @@ export class Store {
     });
   }
 
+  // ---- git worktrees (one active per session)
+  private wtRow(r: any): T.Worktree {
+    return { id: r.id, projectId: r.project_id, sessionId: r.session_id, path: r.path, branch: r.branch, baseBranch: r.base_branch,
+      baseRevision: r.base_revision, status: r.status, createdAt: r.created_at, removedAt: r.removed_at };
+  }
+  createWorktree(i: { projectId: string; sessionId: string; path: string; branch: string; baseBranch: string; baseRevision: string }): T.Worktree {
+    return this.tx(() => {
+      const id = newId('wt'), t = now();
+      this.db.prepare('INSERT INTO worktree (id,project_id,session_id,path,branch,base_branch,base_revision,created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(id, i.projectId, i.sessionId, i.path, i.branch, i.baseBranch, i.baseRevision, t);
+      this.db.prepare('UPDATE session SET worktree_path=?, updated_at=? WHERE id=?').run(i.path, t, i.sessionId);
+      this.appendEvent({ sessionId: i.sessionId, type: 'worktree.created', payload: { worktreeId: id, path: i.path, branch: i.branch, baseRevision: i.baseRevision } });
+      return this.getWorktree(id)!;
+    });
+  }
+  getWorktree(id: string): T.Worktree | undefined { const r = this.one<any>('SELECT * FROM worktree WHERE id=?', id); return r && this.wtRow(r); }
+  activeWorktreeForSession(sessionId: string): T.Worktree | undefined {
+    const r = this.one<any>("SELECT * FROM worktree WHERE session_id=? AND status='active'", sessionId); return r && this.wtRow(r);
+  }
+  listWorktrees(projectId: string, status?: 'active' | 'removed'): T.Worktree[] {
+    return this.all<any>(`SELECT * FROM worktree WHERE project_id=?${status ? ' AND status=?' : ''} ORDER BY created_at, rowid`, ...[projectId, ...(status ? [status] : [])]).map((r) => this.wtRow(r));
+  }
+  markWorktreeRemoved(id: string): T.Worktree {
+    return this.tx(() => {
+      const w = this.getWorktree(id); if (!w) throw new Error(`worktree not found: ${id}`);
+      const t = now();
+      this.db.prepare("UPDATE worktree SET status='removed', removed_at=? WHERE id=?").run(t, id);
+      this.db.prepare('UPDATE session SET worktree_path=NULL, updated_at=? WHERE id=? AND worktree_path=?').run(t, w.sessionId, w.path);
+      this.appendEvent({ sessionId: w.sessionId, type: 'worktree.removed', payload: { worktreeId: id, path: w.path, branch: w.branch } });
+      return this.getWorktree(id)!;
+    });
+  }
+
+  // ---- memory (content is immutable; only status/seen_count/updated_at change)
+  private memRow(r: any): T.MemoryEntry {
+    return { id: r.id, scope: r.scope, projectId: r.project_id, sessionId: r.session_id, category: r.category, content: r.content,
+      authorRole: r.author_role, trust: r.trust, source: { kind: r.source_kind, ref: r.source_ref }, status: r.status,
+      supersededBy: r.superseded_by, seenCount: r.seen_count, createdAt: r.created_at, updatedAt: r.updated_at };
+  }
+  addMemory(i: { scope: 'project' | 'session'; projectId: string; sessionId?: string; category: string; content: string; contentHash: string;
+    authorRole: string; trust: 'user' | 'agent'; source: { kind: string; ref?: string | null } }): T.MemoryEntry {
+    return this.tx(() => {
+      const id = newId('mem'), t = now();
+      this.db.prepare(`INSERT INTO memory_entry (id,scope,project_id,session_id,category,content,content_hash,author_role,trust,source_kind,source_ref,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, i.scope, i.projectId, i.sessionId ?? null, i.category, redactString(i.content), i.contentHash, i.authorRole, i.trust, i.source.kind, i.source.ref ?? null, t, t);
+      if (i.sessionId) this.appendEvent({ sessionId: i.sessionId, type: 'memory.added', payload: { memoryId: id, category: i.category, authorRole: i.authorRole } });
+      return this.getMemory(id)!;
+    });
+  }
+  getMemory(id: string): T.MemoryEntry | undefined { const r = this.one<any>('SELECT * FROM memory_entry WHERE id=?', id); return r && this.memRow(r); }
+  findActiveMemoryByHash(i: { projectId: string; scope: string; sessionId?: string; category: string; contentHash: string }): T.MemoryEntry | undefined {
+    const r = this.one<any>(`SELECT * FROM memory_entry WHERE project_id=? AND scope=? AND COALESCE(session_id,'')=? AND category=? AND content_hash=? AND status='active'`,
+      i.projectId, i.scope, i.sessionId ?? '', i.category, i.contentHash);
+    return r && this.memRow(r);
+  }
+  /** Project-scope entries of a project, or the session-scope entries of one session. */
+  listMemory(o: { projectId: string; sessionId?: string; status?: T.MemoryEntry['status'] }): T.MemoryEntry[] {
+    const where = o.sessionId ? "scope='session' AND session_id=?" : "scope='project' AND project_id=?";
+    return this.all<any>(`SELECT * FROM memory_entry WHERE ${where}${o.status ? ' AND status=?' : ''} ORDER BY created_at, rowid`,
+      ...[o.sessionId ?? o.projectId, ...(o.status ? [o.status] : [])]).map((r) => this.memRow(r));
+  }
+  touchMemory(id: string) { this.db.prepare('UPDATE memory_entry SET seen_count=seen_count+1, updated_at=? WHERE id=?').run(now(), id); return this.getMemory(id)!; }
+  setMemoryStatus(id: string, status: 'superseded' | 'archived', supersededBy?: string): T.MemoryEntry {
+    this.db.prepare("UPDATE memory_entry SET status=?, superseded_by=?, updated_at=? WHERE id=? AND status='active'").run(status, supersededBy ?? null, now(), id);
+    return this.getMemory(id)!;
+  }
+
   // ---- knowledge graph (schema only in Phase 1; indexing arrives in Phase 10)
   addNode(i: Omit<T.KnowledgeNode, 'id'>): T.KnowledgeNode {
     const id = newId('kn');

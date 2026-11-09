@@ -79,4 +79,56 @@ CREATE TABLE worktree_lock (
 );
 `,
   },
+  {
+    version: 3,
+    sql: `
+-- Project memory (scope='project', shared) and session memory (scope='session', one feature) are kept apart.
+-- Rows are never deleted and their text/author/source never change: superseding or archiving only flips status.
+CREATE TABLE memory_entry (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL CHECK (scope IN ('project','session')),
+  project_id TEXT NOT NULL REFERENCES project(id),
+  session_id TEXT REFERENCES session(id),
+  category TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  author_role TEXT NOT NULL,
+  trust TEXT NOT NULL CHECK (trust IN ('user','agent')),
+  source_kind TEXT NOT NULL,
+  source_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded','archived')),
+  superseded_by TEXT,
+  seen_count INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK ((scope = 'session') = (session_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX idx_memory_dedupe ON memory_entry(project_id, scope, COALESCE(session_id,''), category, content_hash) WHERE status = 'active';
+CREATE INDEX idx_memory_owner ON memory_entry(project_id, session_id, status);
+CREATE TRIGGER memory_no_delete BEFORE DELETE ON memory_entry BEGIN SELECT RAISE(ABORT, 'memory is never deleted; archive it'); END;
+CREATE TRIGGER memory_immutable BEFORE UPDATE OF content, content_hash, author_role, trust, source_kind, source_ref, scope, project_id, session_id, category, created_at
+  ON memory_entry BEGIN SELECT RAISE(ABORT, 'memory content, author and source are immutable'); END;
+`,
+  },
+  {
+    version: 4,
+    sql: `
+-- One isolated git worktree per session. Rows are kept after removal (status='removed') as a record.
+CREATE TABLE worktree (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(id),
+  session_id TEXT NOT NULL REFERENCES session(id),
+  path TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
+  base_revision TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','removed')),
+  created_at TEXT NOT NULL,
+  removed_at TEXT
+);
+CREATE UNIQUE INDEX idx_worktree_session_active ON worktree(session_id) WHERE status = 'active';
+CREATE UNIQUE INDEX idx_worktree_path_active ON worktree(path) WHERE status = 'active';
+CREATE INDEX idx_worktree_project ON worktree(project_id, status);
+`,
+  },
 ];

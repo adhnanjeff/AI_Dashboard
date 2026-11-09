@@ -41,5 +41,16 @@ export interface Approval {
   id: string; sessionId: string; action: string; evidence: Record<string, unknown>;
   status: ApprovalState; approver: string | null; decidedAt: string | null; createdAt: string;
 }
+export interface Worktree {
+  id: string; projectId: string; sessionId: string; path: string; branch: string;
+  baseBranch: string; baseRevision: string; status: 'active' | 'removed'; createdAt: string; removedAt: string | null;
+}
+export interface MemoryEntry {
+  id: string; scope: 'project' | 'session'; projectId: string; sessionId: string | null;
+  category: string; content: string; authorRole: string; trust: 'user' | 'agent';
+  source: { kind: string; ref: string | null };
+  status: 'active' | 'superseded' | 'archived'; supersededBy: string | null; seenCount: number;
+  createdAt: string; updatedAt: string;
+}
 export interface KnowledgeNode { id: string; projectId: string; kind: string; name: string; provenance: string; verified: boolean }
 export interface KnowledgeEdge { id: string; fromId: string; toId: string; kind: string; provenance: string; verified: boolean }

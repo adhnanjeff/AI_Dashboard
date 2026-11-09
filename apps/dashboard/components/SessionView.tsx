@@ -9,8 +9,11 @@ import { isDemo } from '../lib/status.ts';
 import type { Changes, Run, SessionDetail } from '../lib/types.ts';
 import ChangesPanel from './ChangesPanel.tsx';
 import Controls from './Controls.tsx';
+import HandoffPanel from './HandoffPanel.tsx';
+import MemoryPanel from './MemoryPanel.tsx';
 import { Ago, ErrorBanner, StatusBadge, StreamBadge } from './small.tsx';
 import Timeline from './Timeline.tsx';
+import WorktreePanel from './WorktreePanel.tsx';
 
 export default function SessionView({ id }: { id: string }) {
   const detail = usePolling(() => api<SessionDetail>(`/sessions/${id}`), 5000, `d:${id}`);
@@ -70,6 +73,7 @@ export default function SessionView({ id }: { id: string }) {
         </div>
 
         <div className="stack">
+          {d && <WorktreePanel sessionId={id} projectId={d.session.projectId} hasRuns={(runs.data?.length ?? 0) > 0} />}
           <ChangesPanel sessionId={id} changes={changes} />
 
           <section className="card" aria-labelledby="runs-h">
@@ -92,6 +96,10 @@ export default function SessionView({ id }: { id: string }) {
               </table>
             )}
           </section>
+
+          {d && <MemoryPanel scope="session" id={id} heading="Session notes" blurb="Decisions, rejected approaches and open questions for this feature only. Kept apart from project memory." />}
+          {d && <p className="small" style={{ margin: 0 }}><Link href={`/projects/${d.session.projectId}/memory`}>Open shared project memory →</Link></p>}
+          {d && <HandoffPanel sessionId={id} />}
 
           {d?.checkpoint && (
             <section className="card" aria-labelledby="cp-h">
