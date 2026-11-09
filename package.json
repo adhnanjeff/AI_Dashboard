@@ -13,6 +13,10 @@
     "demo3:status": "node scripts/phase3-demo.mjs status",
     "demo3:resume": "node scripts/phase3-demo.mjs resume",
     "db:seed": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db seed",
-    "db:dump": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db dump"
+    "db:dump": "node --no-warnings services/orchestrator/src/storage/cli.ts .sandbox/demo.db dump",
+    "dashboard:install": "npm --prefix apps/dashboard install",
+    "dashboard:dev": "npm --prefix apps/dashboard run dev",
+    "dashboard:build": "npm --prefix apps/dashboard run build",
+    "dashboard:typecheck": "npm --prefix apps/dashboard run typecheck"
   }
 }

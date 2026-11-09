@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "orchestrator",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--no-warnings", "services/orchestrator/src/main.ts"],
+      "port": 4317
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["apps/dashboard/node_modules/next/dist/bin/next", "dev", "apps/dashboard", "-p", "3000", "-H", "127.0.0.1"],
+      "port": 3000
+    }
+  ]
+}

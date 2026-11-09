@@ -222,7 +222,7 @@ test('API: cancel a running task', async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
-    const run = await (await fetch(`${base}/tasks/${w.task.id}/runs`, { method: 'POST', body: JSON.stringify({ model: 'm' }) })).json() as any;
+    const run = await (await fetch(`${base}/tasks/${w.task.id}/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'm' }) })).json() as any;
     const c = await (await fetch(`${base}/runs/${run.id}/cancel`, { method: 'POST' })).json() as any;
     assert.equal(c.status, 'cancelled');
     assert.equal(w.store.getSession(w.session.id)!.status, 'paused');
