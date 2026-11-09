@@ -112,6 +112,10 @@ export class Store {
       cliSessionId: r.cli_session_id, status: r.status, exitCode: r.exit_code, terminationReason: r.termination_reason,
       startedAt: r.started_at, endedAt: r.ended_at };
   }
+  listRuns(status?: WorkState): T.AgentRun[] {
+    const rows = status ? this.all<any>('SELECT id FROM agent_run WHERE status=?', status) : this.all<any>('SELECT id FROM agent_run');
+    return rows.map((r) => this.getRun(r.id)!);
+  }
   transitionRun(id: string, to: WorkState, info: { pid?: number; cliSessionId?: string; exitCode?: number; reason?: string } = {}): T.AgentRun {
     return this.tx(() => {
       const r = this.getRun(id); if (!r) throw new Error(`run not found: ${id}`);
