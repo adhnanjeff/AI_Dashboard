@@ -4,9 +4,11 @@ import { resolve, sep } from 'node:path';
 import type { Store } from '../storage/store.ts';
 import type { DomainEvent } from '../domain/types.ts';
 import { snapshot } from '../checkpoints/git.ts';
-import { IdempotencyConflictError, SessionBusyError, WorktreeBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
+import { IdempotencyConflictError, SessionBusyError, WorktreeBusyError, WrongWorkdirError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
 import { InvalidTransitionError } from '../domain/states.ts';
 import { ResumeError, ResumeService } from '../checkpoints/resume-service.ts';
+import { MemoryError, MemoryService } from '../memory/memory-service.ts';
+import { WorktreeError, WorktreeService } from '../worktrees/worktree-service.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
 
@@ -39,6 +41,8 @@ const FILE_CAP = 200 * 1024;
 export interface ApiOptions {
   /** Browser origins allowed to call this API directly. Default none: the dashboard reaches us server-to-server. */
   allowedOrigins?: string[];
+  /** Directory that holds per-session git worktrees. Default: <repo>.worktrees next to each repository. */
+  worktreeRoot?: string;
 }
 
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
@@ -50,7 +54,13 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
     const s = store.getSession(sessionId)!;
     return s.worktreePath ?? store.getProject(s.projectId)!.repoPath;
   };
-  const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints) : undefined;
+  const memory = new MemoryService(store);
+  const worktrees = new WorktreeService(store, { root: opts.worktreeRoot });
+  const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints, memory) : undefined;
+  // Memory writes name a role. Until agents get a tool bridge, the only caller is the local dashboard/user, so the
+  // role is asserted by the caller; the service still enforces what each role may write.
+  const memBody = (b: any) => ({ category: str(b.category, 'category'), content: str(b.content, 'content'),
+    role: b.role === undefined ? 'user' : str(b.role, 'role'), source: b.source && typeof b.source === 'object' ? { kind: b.source.kind, ref: b.source.ref } : undefined });
   const send = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
   };
@@ -160,11 +170,41 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         const task = need(store.getTask(parts[1]), 'task');
         const project = store.getProject(store.getSession(task.sessionId)!.projectId)!;
         const model = str(b.model, 'model'); if (!MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+        const notes = memory.contextFor(task.sessionId, `${task.description} ${task.acceptanceCriteria.join(' ')}`);
         const prompt = typeof b.prompt === 'string' && b.prompt.trim() ? b.prompt
-          : `${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`;
+          : `${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}${notes ? `\n\n${notes}` : ''}`;
         const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
         if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
-        return send(res, 202, supervisor.start({ taskId: task.id, prompt, cwd: project.repoPath, model, timeoutMs, idempotencyKey: idemKey(req) }));
+        return send(res, 202, supervisor.start({ taskId: task.id, prompt, cwd: workdir(task.sessionId), model, timeoutMs, idempotencyKey: idemKey(req) }));
+      }
+      // ---- memory: project-wide and per-session, kept separate
+      if (parts[0] === 'projects' && parts[2] === 'memory') {
+        const project = need(store.getProject(parts[1]), 'project');
+        if (m === 'GET' && parts.length === 3) return send(res, 200, memory.list({ projectId: project.id, status: url.searchParams.get('all') ? undefined : 'active' }));
+        if (m === 'POST' && parts.length === 3) { const r = memory.add({ projectId: project.id, ...memBody(await readJson(req)) }); return send(res, r.deduped ? 200 : 201, r); }
+        if (m === 'POST' && parts[3] === 'compact') return send(res, 200, memory.compact({ projectId: project.id }));
+      }
+      if (parts[0] === 'sessions' && ['memory', 'context', 'handoff'].includes(parts[2])) {
+        const s = need(store.getSession(parts[1]), 'session');
+        if (parts[2] === 'memory' && m === 'GET' && parts.length === 3) return send(res, 200, memory.list({ projectId: s.projectId, sessionId: s.id, status: url.searchParams.get('all') ? undefined : 'active' }));
+        if (parts[2] === 'memory' && m === 'POST' && parts.length === 3) { const r = memory.add({ projectId: s.projectId, sessionId: s.id, ...memBody(await readJson(req)) }); return send(res, r.deduped ? 200 : 201, r); }
+        if (parts[2] === 'memory' && m === 'POST' && parts[3] === 'compact') return send(res, 200, memory.compact({ projectId: s.projectId, sessionId: s.id }));
+        if (parts[2] === 'context' && m === 'GET') return send(res, 200, memory.retrieve({ projectId: s.projectId, sessionId: s.id, query: url.searchParams.get('q') ?? '' }));
+        if (parts[2] === 'handoff' && m === 'GET') return send(res, 200, memory.handoff(s.id, checkpoints));
+      }
+      if (m === 'POST' && parts[0] === 'memory' && parts[2] === 'archive') {
+        const b = await readJson(req); return send(res, 200, memory.archive(parts[1], b.role === undefined ? 'user' : str(b.role, 'role')));
+      }
+      // ---- isolated git worktrees
+      if (m === 'GET' && parts[0] === 'projects' && parts[2] === 'worktrees') return send(res, 200, worktrees.overview(need(store.getProject(parts[1]), 'project').id));
+      if (parts[0] === 'sessions' && parts[2] === 'worktree') {
+        const s = need(store.getSession(parts[1]), 'session'); const w = worktrees.get(s.id);
+        if (m === 'POST' && parts.length === 3) return send(res, 201, worktrees.create(s.id));
+        if (m === 'GET' && parts.length === 3) return send(res, 200, w ? worktrees.status(w) : null);
+        const active = need(w, 'worktree');
+        if (m === 'GET' && parts[3] === 'merge-check') return send(res, 200, worktrees.mergeCheck(active));
+        if (m === 'GET' && parts[3] === 'remove-preview') return send(res, 200, worktrees.removalPreview(active));
+        if (m === 'POST' && parts[3] === 'remove') return send(res, 200, worktrees.remove(active));
       }
       if (m === 'GET' && url.pathname === '/worktree-locks') return send(res, 200, store.listWorktreeLocks());
 
@@ -216,8 +256,9 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       }
       throw new HttpError(404, 'not found');
     } catch (e: any) {
-      if (e instanceof HttpError) return send(res, e.status, { error: e.message });
-      if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError) return send(res, 409, { error: e.message });
+      if (e instanceof HttpError || e instanceof MemoryError) return send(res, e.status, { error: e.message });
+      if (e instanceof WorktreeError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError || e instanceof WrongWorkdirError) return send(res, 409, { error: e.message });
       if (e instanceof ResumeError) return send(res, 409, { error: e.message, drift: e.drift });
       if (e instanceof InvalidTransitionError) return send(res, 409, { error: e.message });
       if (/cannot be started/.test(e?.message)) return send(res, 409, { error: e.message });

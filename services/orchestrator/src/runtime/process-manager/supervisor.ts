@@ -28,10 +28,11 @@ interface Active {
 export class SessionBusyError extends Error {}
 export class WorktreeBusyError extends Error {}
 export class IdempotencyConflictError extends Error {}
+export class WrongWorkdirError extends Error {}
 
 const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
 // Normalised so "C:\Repo", "c:/repo/" and "C:\Repo\" are the same lock on Windows.
-const lockKey = (cwd: string) => { const p = resolve(cwd).replace(/[\\/]+$/, ''); return process.platform === 'win32' ? p.toLowerCase() : p; };
+export const lockKey = (cwd: string) => { const p = resolve(cwd).replace(/[\\/]+$/, ''); return process.platform === 'win32' ? p.toLowerCase() : p; };
 
 // Owns the lifecycle of agent processes and is the only thing that writes run outcomes.
 // Rule: a run is `completed` only when the process exited 0 AND the provider reported a successful
@@ -63,6 +64,11 @@ export class Supervisor {
     }
     for (const a of this.active.values())
       if (a.sessionId === session.id) throw new SessionBusyError(`session ${session.id} already has an active run (${a.runId})`);
+
+    // A session with an isolated worktree may only ever run there: it must not write into the main checkout
+    // or into another session's worktree, whatever the caller passes.
+    if (session.worktreePath && lockKey(session.worktreePath) !== lockKey(input.cwd))
+      throw new WrongWorkdirError(`session is bound to worktree ${session.worktreePath}; refusing to run in ${input.cwd}`);
 
     // One writer per working directory, even across sessions. Checked before any state is changed.
     const lockPath = lockKey(input.cwd);

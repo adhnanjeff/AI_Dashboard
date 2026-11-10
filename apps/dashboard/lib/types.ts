@@ -21,6 +21,26 @@ export interface SessionSummary {
 export interface SessionDetail { session: Session; tasks: Task[]; checkpoint: Checkpoint | null }
 export interface DomainEvent { id: string; sessionId: string; seq: number; type: string; runId: string | null; payload: Record<string, any>; createdAt: string }
 export interface Checkpoint { id: string; seq: number; nextAction: string; createdAt: string; data: { reason: string; changedFiles: string[]; lastEventSeq: number; lastAgentMessage: string | null } }
+export interface MemoryEntry {
+  id: string; scope: 'project' | 'session'; projectId: string; sessionId: string | null; category: string; content: string;
+  authorRole: string; trust: 'user' | 'agent'; source: { kind: string; ref: string | null };
+  status: 'active' | 'superseded' | 'archived'; supersededBy: string | null; seenCount: number; createdAt: string; updatedAt: string;
+}
+export interface WorktreeRec { id: string; projectId: string; sessionId: string; path: string; branch: string; baseBranch: string; baseRevision: string; status: 'active' | 'removed'; createdAt: string }
+export interface WorktreeStatus {
+  worktree: WorktreeRec; exists: boolean; currentBranch: string | null; head: string | null; ahead: number; behind: number;
+  uncommitted: string[]; committed: string[]; touched: string[]; numstat: { path: string; added: number | null; deleted: number | null }[]; busyRunId: string | null;
+}
+export interface MergeCheck { target: string; branch: string; clean: boolean; conflicts: string[]; ahead: number; behind: number; uncommittedNotIncluded: string[]; note: string | null; error?: string }
+export interface RemovalPreview { canRemove: boolean; blockers: string[]; willRemoveDirectory: string; branchKept: string; unmergedCommits: number; note: string }
+export interface WorktreeOverview {
+  project: { id: string; name: string; defaultBranch: string };
+  worktrees: WorktreeStatus[];
+  overlaps: { a: string; b: string; sessionA: string; sessionB: string; files: string[] }[];
+  integration: { target: string; integrationBranch: string; order: { sessionId: string; branch: string; clean: boolean; conflicts: string[]; uncommitted: number }[];
+    pairConflicts: { a: string; b: string; conflicts: string[] }[]; commands: string[]; note: string };
+}
+export interface Handoff { generatedAt: string; markdown: string; facts: Record<string, unknown> }
 export interface Drift { level: 'unchanged' | 'changed' | 'blocked'; notes: string[]; added: string[]; removed: string[] }
 export interface Changes {
   available: boolean; branch: string | null; revision: string | null; status: string;
