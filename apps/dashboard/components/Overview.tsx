@@ -20,7 +20,7 @@ export default function Overview() {
           <h1>Overview</h1>
           <Link href="/new" className="btn primary">+ New session</Link>
         </div>
-        <p className="muted" style={{ margin: 0 }}>
+        <p className="sub">
           Every number and status here comes from the orchestrator&apos;s database.
           {list.updatedAt && <> Updated <Ago ms={list.updatedAt} />.</>}
         </p>
@@ -31,9 +31,9 @@ export default function Overview() {
 
       <section aria-label="Totals" className="cards">
         {CARD_STATES.map((s) => (
-          <div className="card" key={s}>
+          <div className={`card stat-card tone-${STATE_META[s].tone}`} key={s}>
+            <div className="label"><span className="g" aria-hidden="true">{STATE_META[s].glyph}</span>{STATE_META[s].label}</div>
             <div className="stat">{count(s)}</div>
-            <div className="muted">{STATE_META[s].glyph} {STATE_META[s].label}</div>
           </div>
         ))}
       </section>
