@@ -3,7 +3,7 @@ import { useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, newIdempotencyKey } from '../lib/api.ts';
 import { usePolling } from '../lib/hooks.ts';
-import { DEFAULT_MODEL, MODELS } from '../lib/models.ts';
+import { DEFAULT_MODEL, MODEL_CHOICES } from '../lib/models.ts';
 import type { Project, Session, Task } from '../lib/types.ts';
 import { ErrorBanner } from './small.tsx';
 
@@ -68,7 +68,7 @@ export default function NewSession() {
           <textarea value={criteria} onChange={(e) => setCriteria(e.target.value)} />
         </label>
         <label className="field">Model
-          <select value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+          <select value={model} onChange={(e) => setModel(e.target.value)}>{MODEL_CHOICES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
         </label>
         <label className="field">
           <span className="row"><input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} /> Work in an isolated git worktree</span>

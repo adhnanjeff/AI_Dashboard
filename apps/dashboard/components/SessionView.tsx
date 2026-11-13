@@ -10,6 +10,7 @@ import type { Changes, Run, SessionDetail } from '../lib/types.ts';
 import ChangesPanel from './ChangesPanel.tsx';
 import Controls from './Controls.tsx';
 import HandoffPanel from './HandoffPanel.tsx';
+import RoutingPanel from './RoutingPanel.tsx';
 import MemoryPanel from './MemoryPanel.tsx';
 import { Ago, ErrorBanner, StatusBadge, StreamBadge } from './small.tsx';
 import Timeline from './Timeline.tsx';
@@ -100,6 +101,7 @@ export default function SessionView({ id }: { id: string }) {
           {d && <MemoryPanel scope="session" id={id} heading="Session notes" blurb="Decisions, rejected approaches and open questions for this feature only. Kept apart from project memory." />}
           {d && <p className="small" style={{ margin: 0 }}><Link href={`/projects/${d.session.projectId}/memory`}>Open shared project memory →</Link></p>}
           {d && <HandoffPanel sessionId={id} />}
+          {d && <RoutingPanel sessionId={id} status={d.session.status} onChanged={reload} />}
 
           {d?.checkpoint && (
             <section className="card" aria-labelledby="cp-h">

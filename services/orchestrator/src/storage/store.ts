@@ -108,11 +108,11 @@ export class Store {
   }
 
   // ---- agent runs
-  createRun(i: { taskId: string; role: string; provider: string; model: string; idempotencyKey?: string }): T.AgentRun {
+  createRun(i: { taskId: string; role: string; provider: string; model: string; idempotencyKey?: string; accountId?: string }): T.AgentRun {
     return this.tx(() => {
       const id = newId('run'), tk = this.getTask(i.taskId); if (!tk) throw new Error(`task not found: ${i.taskId}`);
-      this.db.prepare("INSERT INTO agent_run (id,task_id,role,provider,model,status,idempotency_key) VALUES (?,?,?,?,?, 'queued', ?)")
-        .run(id, i.taskId, i.role, i.provider, i.model, i.idempotencyKey ?? null);
+      this.db.prepare("INSERT INTO agent_run (id,task_id,role,provider,model,status,idempotency_key,account_id) VALUES (?,?,?,?,?, 'queued', ?, ?)")
+        .run(id, i.taskId, i.role, i.provider, i.model, i.idempotencyKey ?? null, i.accountId ?? null);
       this.appendEvent({ sessionId: tk.sessionId, runId: id, type: 'run.created', payload: { role: i.role, model: i.model } });
       return this.getRun(id)!;
     });
@@ -121,7 +121,7 @@ export class Store {
     const r = this.one<any>('SELECT * FROM agent_run WHERE id=?', id);
     return r && { id: r.id, taskId: r.task_id, role: r.role, provider: r.provider, model: r.model, pid: r.pid,
       cliSessionId: r.cli_session_id, status: r.status, exitCode: r.exit_code, terminationReason: r.termination_reason,
-      startedAt: r.started_at, endedAt: r.ended_at, idempotencyKey: r.idempotency_key };
+      startedAt: r.started_at, endedAt: r.ended_at, idempotencyKey: r.idempotency_key, accountId: r.account_id ?? null };
   }
   listRunsForSession(sessionId: string): T.AgentRun[] {
     return this.all<{ id: string }>('SELECT r.id FROM agent_run r JOIN task t ON t.id=r.task_id WHERE t.session_id=? ORDER BY r.rowid', sessionId)
@@ -231,14 +231,20 @@ export class Store {
   // ---- routing decisions
   recordRouting(i: Omit<T.RoutingDecision, 'id' | 'createdAt'>): T.RoutingDecision {
     const id = newId('rte'), t = now();
-    this.db.prepare('INSERT INTO routing_decision VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, i.runId, i.provider, i.model, i.policyVersion, i.reason, j(i.usage), t);
+    this.db.prepare('INSERT INTO routing_decision (id,run_id,provider,model,policy_version,reason,usage,created_at,inputs) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, i.runId, i.provider, i.model, i.policyVersion, redactString(i.reason), j(i.usage), t, j(i.inputs ?? {}));
     return { ...i, id, createdAt: t };
   }
   listRouting(runId: string): T.RoutingDecision[] {
     return this.all<any>('SELECT * FROM routing_decision WHERE run_id=? ORDER BY created_at', runId).map((r) => ({
       id: r.id, runId: r.run_id, provider: r.provider, model: r.model, policyVersion: r.policy_version,
-      reason: r.reason, usage: p(r.usage), createdAt: r.created_at }));
+      reason: r.reason, usage: p(r.usage), inputs: p(r.inputs ?? '{}'), createdAt: r.created_at }));
+  }
+  getRouting(id: string): T.RoutingDecision | undefined {
+    const r = this.one<any>('SELECT run_id FROM routing_decision WHERE id=?', id); return r && this.listRouting(r.run_id).find((d) => d.id === id);
+  }
+  listRoutingSince(since: string): T.RoutingDecision[] {
+    return this.all<any>('SELECT DISTINCT run_id FROM routing_decision WHERE created_at >= ?', since).flatMap((r) => this.listRouting(r.run_id));
   }
 
   // ---- approvals
@@ -349,5 +355,120 @@ export class Store {
   listEdges(nodeId: string): T.KnowledgeEdge[] {
     return this.all<any>('SELECT * FROM knowledge_edge WHERE from_id=? OR to_id=?', nodeId, nodeId)
       .map((r) => ({ id: r.id, fromId: r.from_id, toId: r.to_id, kind: r.kind, provenance: r.provenance, verified: !!r.verified }));
+  }
+
+  // ---- Phase 7: policy versions and usage
+  latestPolicy(): T.PolicyVersion | undefined {
+    const r = this.one<any>('SELECT * FROM routing_policy ORDER BY version DESC LIMIT 1');
+    return r && { version: r.version, config: p(r.config), note: r.note, createdBy: r.created_by, createdAt: r.created_at };
+  }
+  getPolicy(version: number): T.PolicyVersion | undefined {
+    const r = this.one<any>('SELECT * FROM routing_policy WHERE version=?', version);
+    return r && { version: r.version, config: p(r.config), note: r.note, createdBy: r.created_by, createdAt: r.created_at };
+  }
+  listPolicies(): T.PolicyVersion[] {
+    return this.all<any>('SELECT version FROM routing_policy ORDER BY version DESC').map((r) => this.getPolicy(r.version)!);
+  }
+  publishPolicy(config: unknown, createdBy: string, note?: string): T.PolicyVersion {
+    return this.tx(() => {
+      const next = (this.one<any>('SELECT MAX(version) v FROM routing_policy')?.v ?? 0) + 1;
+      this.db.prepare('INSERT INTO routing_policy VALUES (?,?,?,?,?)').run(next, j(config), note ?? null, createdBy, now());
+      this.audit(createdBy, 'policy.published', `policy:${next}`, { version: next, note: note ?? null });
+      return this.getPolicy(next)!;
+    });
+  }
+  recordUsage(i: { runId: string; inputTokens?: number; outputTokens?: number; costUsd?: number }): void {
+    const run = this.getRun(i.runId); if (!run) return;
+    const tk = this.getTask(run.taskId)!, s = this.getSession(tk.sessionId)!;
+    this.db.prepare('INSERT OR IGNORE INTO usage_record VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(i.runId, s.id, tk.id, s.projectId, run.provider, run.model, i.inputTokens ?? null, i.outputTokens ?? null, i.costUsd ?? null, 'reported', now());
+  }
+  getUsage(runId: string): T.UsageRecord | undefined {
+    const r = this.one<any>('SELECT * FROM usage_record WHERE run_id=?', runId);
+    return r && { runId: r.run_id, sessionId: r.session_id, taskId: r.task_id, projectId: r.project_id, provider: r.provider, model: r.model,
+      inputTokens: r.input_tokens, outputTokens: r.output_tokens, costUsd: r.cost_usd, source: 'reported', createdAt: r.created_at };
+  }
+  /** Every run that actually started, with its reported cost if there is one. The unit all budget and analytics maths use. */
+  runCostRows(f: { since?: string; taskId?: string; projectId?: string } = {}): T.RunCostRow[] {
+    return this.all<any>(`SELECT r.id run_id, r.task_id, t.session_id, s.project_id, r.provider, r.model, r.role, r.status, r.started_at,
+        u.cost_usd, u.input_tokens, u.output_tokens, (u.run_id IS NOT NULL AND u.cost_usd IS NOT NULL) reported
+      FROM agent_run r JOIN task t ON t.id=r.task_id JOIN session s ON s.id=t.session_id LEFT JOIN usage_record u ON u.run_id=r.id
+      WHERE r.started_at IS NOT NULL AND (? IS NULL OR r.started_at >= ?) AND (? IS NULL OR r.task_id = ?) AND (? IS NULL OR s.project_id = ?)
+      ORDER BY r.started_at`, f.since ?? null, f.since ?? null, f.taskId ?? null, f.taskId ?? null, f.projectId ?? null, f.projectId ?? null)
+      .map((r) => ({ runId: r.run_id, taskId: r.task_id, sessionId: r.session_id, projectId: r.project_id, provider: r.provider, model: r.model,
+        role: r.role, status: r.status, startedAt: r.started_at, costUsd: r.cost_usd, inputTokens: r.input_tokens, outputTokens: r.output_tokens, reported: !!r.reported }));
+  }
+  failedRunCount(taskId: string): number {
+    // Provider-level failures (rate limit, cannot start) say nothing about the task, so they neither escalate nor use up attempts.
+    return this.one<any>("SELECT COUNT(*) n FROM agent_run WHERE task_id=? AND status='failed' AND COALESCE(termination_reason,'') NOT LIKE 'provider rate limited%' AND COALESCE(termination_reason,'') NOT LIKE 'spawn error%' AND COALESCE(termination_reason,'') NOT LIKE 'launch error%' AND COALESCE(termination_reason,'') NOT LIKE 'orphaned%'", taskId)!.n;
+  }
+
+  // ---- Phase 8: audit, provider accounts, health, queue, handoffs
+  audit(actor: string, action: string, subject: string, details: Record<string, unknown> = {}) {
+    this.db.prepare('INSERT INTO audit_log (at,actor,action,subject,details) VALUES (?,?,?,?,?)').run(now(), actor, action, subject, j(redact(details)));
+  }
+  listAudit(limit = 100): T.AuditEntry[] {
+    return this.all<any>('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?', limit)
+      .map((r) => ({ id: r.id, at: r.at, actor: r.actor, action: r.action, subject: r.subject, details: p(r.details) }));
+  }
+  private acct = (r: any): T.ProviderAccount => ({ id: r.id, provider: r.provider, label: r.label, configDir: r.config_dir, credentialRef: r.credential_ref,
+    priority: r.priority, enabled: !!r.enabled, lastUsedAt: r.last_used_at, createdAt: r.created_at });
+  createAccount(i: { provider: string; label: string; configDir?: string; credentialRef?: string; priority?: number }): T.ProviderAccount {
+    const id = newId('acc');
+    this.db.prepare('INSERT INTO provider_account VALUES (?,?,?,?,?,?,1,NULL,?)').run(id, i.provider, i.label, i.configDir ?? null, i.credentialRef ?? null, i.priority ?? 0, now());
+    return this.getAccount(id)!;
+  }
+  getAccount(id: string) { const r = this.one<any>('SELECT * FROM provider_account WHERE id=?', id); return r && this.acct(r); }
+  listAccounts(provider?: string): T.ProviderAccount[] {
+    return (provider ? this.all<any>('SELECT * FROM provider_account WHERE provider=? ORDER BY priority DESC, created_at', provider)
+      : this.all<any>('SELECT * FROM provider_account ORDER BY provider, priority DESC, created_at')).map(this.acct);
+  }
+  setAccountEnabled(id: string, enabled: boolean) { this.db.prepare('UPDATE provider_account SET enabled=? WHERE id=?').run(enabled ? 1 : 0, id); }
+  touchAccount(id: string) { this.db.prepare('UPDATE provider_account SET last_used_at=? WHERE id=?').run(now(), id); }
+  getHealth(provider: string, accountId = ''): T.ProviderHealth | undefined {
+    const r = this.one<any>('SELECT * FROM provider_health WHERE provider=? AND account_id=?', provider, accountId);
+    return r && { provider: r.provider, accountId: r.account_id, limitedUntil: r.limited_until, lastError: r.last_error,
+      consecutiveFailures: r.consecutive_failures, lastOutcome: r.last_outcome, updatedAt: r.updated_at };
+  }
+  listHealth(): T.ProviderHealth[] { return this.all<any>('SELECT provider, account_id FROM provider_health').map((r) => this.getHealth(r.provider, r.account_id)!); }
+  saveHealth(h: Omit<T.ProviderHealth, 'updatedAt'>) {
+    this.db.prepare(`INSERT INTO provider_health VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider, account_id) DO UPDATE SET
+      limited_until=excluded.limited_until, last_error=excluded.last_error, consecutive_failures=excluded.consecutive_failures,
+      last_outcome=excluded.last_outcome, updated_at=excluded.updated_at`)
+      .run(h.provider, h.accountId, h.limitedUntil, h.lastError ? redactString(h.lastError).slice(0, 300) : null, h.consecutiveFailures, h.lastOutcome, now());
+  }
+  private qi = (r: any): T.QueueItem => ({ id: r.id, taskId: r.task_id, sessionId: r.session_id, request: p(r.request), status: r.status, reason: r.reason,
+    attempts: r.attempts, runId: r.run_id, createdAt: r.created_at, updatedAt: r.updated_at });
+  enqueue(i: { taskId: string; sessionId: string; request: Record<string, unknown>; reason: string }): T.QueueItem {
+    const id = newId('que'), t = now();
+    this.tx(() => {
+      this.db.prepare("INSERT INTO queue_item VALUES (?,?,?,?, 'queued', ?, 0, NULL, ?, ?)").run(id, i.taskId, i.sessionId, j(redact(i.request)), i.reason, t, t);
+      this.appendEvent({ sessionId: i.sessionId, type: 'queue.added', payload: { queueId: id, reason: i.reason } });
+    });
+    return this.getQueueItem(id)!;
+  }
+  getQueueItem(id: string) { const r = this.one<any>('SELECT * FROM queue_item WHERE id=?', id); return r && this.qi(r); }
+  listQueue(status?: T.QueueItem['status']): T.QueueItem[] {
+    return (status ? this.all<any>('SELECT * FROM queue_item WHERE status=? ORDER BY created_at, rowid', status)
+      : this.all<any>('SELECT * FROM queue_item ORDER BY created_at DESC, rowid DESC LIMIT 100')).map(this.qi);
+  }
+  updateQueueItem(id: string, u: { status?: T.QueueItem['status']; reason?: string; runId?: string; bumpAttempts?: boolean }) {
+    this.db.prepare('UPDATE queue_item SET status=COALESCE(?,status), reason=COALESCE(?,reason), run_id=COALESCE(?,run_id), attempts=attempts+?, updated_at=? WHERE id=?')
+      .run(u.status ?? null, u.reason ?? null, u.runId ?? null, u.bumpAttempts ? 1 : 0, now(), id);
+    const q = this.getQueueItem(id)!;
+    if (u.status && u.status !== 'queued') this.appendEvent({ sessionId: q.sessionId, type: `queue.${u.status}`, payload: { queueId: id, reason: q.reason, runId: q.runId } });
+    return q;
+  }
+  addHandoff(i: Omit<T.HandoffRecord, 'id' | 'createdAt'>): T.HandoffRecord {
+    const id = newId('hnd'), t = now();
+    this.db.prepare('INSERT INTO handoff VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, i.sessionId, i.fromRunId, i.fromProvider, i.fromAccountId, i.toProvider, i.toAccountId,
+      i.toModel, i.toRunId, i.checkpointId, i.driftLevel, i.fingerprint, i.status, redactString(i.reason), j(i.notes), i.actor, t);
+    return { ...i, id, createdAt: t };
+  }
+  listHandoffs(sessionId: string): T.HandoffRecord[] {
+    return this.all<any>('SELECT * FROM handoff WHERE session_id=? ORDER BY created_at DESC, rowid DESC', sessionId).map((r) => ({ id: r.id, sessionId: r.session_id,
+      fromRunId: r.from_run_id, fromProvider: r.from_provider, fromAccountId: r.from_account_id, toProvider: r.to_provider, toAccountId: r.to_account_id, toModel: r.to_model,
+      toRunId: r.to_run_id, checkpointId: r.checkpoint_id, driftLevel: r.drift_level, fingerprint: r.fingerprint, status: r.status, reason: r.reason,
+      notes: p(r.notes), actor: r.actor, createdAt: r.created_at }));
   }
 }

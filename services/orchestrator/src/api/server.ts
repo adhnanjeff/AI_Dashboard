@@ -9,6 +9,11 @@ import { InvalidTransitionError } from '../domain/states.ts';
 import { ResumeError, ResumeService } from '../checkpoints/resume-service.ts';
 import { MemoryError, MemoryService } from '../memory/memory-service.ts';
 import { WorktreeError, WorktreeService } from '../worktrees/worktree-service.ts';
+import { Router, RoutingError } from '../routing/router.ts';
+import { Scheduler } from '../routing/scheduler.ts';
+import { ProviderError, ProviderService } from '../providers/accounts.ts';
+import { ProviderHealthService } from '../providers/health.ts';
+import { HandoffError, HandoffService } from '../providers/handoff-service.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
 
@@ -43,6 +48,10 @@ export interface ApiOptions {
   allowedOrigins?: string[];
   /** Directory that holds per-session git worktrees. Default: <repo>.worktrees next to each repository. */
   worktreeRoot?: string;
+  /** Where credential variables named by provider accounts are read from. Default: the process environment. */
+  env?: NodeJS.ProcessEnv;
+  /** If set, queued work is offered capacity this often. Off by default (tests call /queue/drain themselves). */
+  drainIntervalMs?: number;
 }
 
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
@@ -56,7 +65,14 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
   };
   const memory = new MemoryService(store);
   const worktrees = new WorktreeService(store, { root: opts.worktreeRoot });
-  const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints, memory) : undefined;
+  const registry = supervisor.registry;
+  const health = supervisor.health ?? new ProviderHealthService(store);
+  const router = new Router(store);
+  const providers = new ProviderService(store, registry, health, opts.env);
+  const scheduler = new Scheduler(store, supervisor, router, providers, registry);
+  const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints, memory, scheduler) : undefined;
+  const handoffs = checkpoints && resumer ? new HandoffService({ store, supervisor, checkpoints, resumer, providers, registry, workdir }) : undefined;
+  const routeInfo = (runId: string) => store.listRouting(runId).map((d) => ({ id: d.id, provider: d.provider, model: d.model, policyVersion: d.policyVersion, reason: d.reason, inputs: d.inputs, createdAt: d.createdAt }));
   // Memory writes name a role. Until agents get a tool bridge, the only caller is the local dashboard/user, so the
   // role is asserted by the caller; the service still enforces what each role may write.
   const memBody = (b: any) => ({ category: str(b.category, 'category'), content: str(b.content, 'content'),
@@ -65,7 +81,7 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
     res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
   };
 
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const parts = url.pathname.split('/').filter(Boolean);
@@ -169,13 +185,17 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         const b = await readJson(req);
         const task = need(store.getTask(parts[1]), 'task');
         const project = store.getProject(store.getSession(task.sessionId)!.projectId)!;
-        const model = str(b.model, 'model'); if (!MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+        const model = b.model === undefined || b.model === '' || b.model === 'auto' ? undefined : str(b.model, 'model');
+        if (model !== undefined && !MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
         const notes = memory.contextFor(task.sessionId, `${task.description} ${task.acceptanceCriteria.join(' ')}`);
         const prompt = typeof b.prompt === 'string' && b.prompt.trim() ? b.prompt
           : `${task.description}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}${notes ? `\n\n${notes}` : ''}`;
         const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
         if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
-        return send(res, 202, supervisor.start({ taskId: task.id, prompt, cwd: workdir(task.sessionId), model, timeoutMs, idempotencyKey: idemKey(req) }));
+        const r = scheduler.launch({ taskId: task.id, prompt, cwd: workdir(task.sessionId), model, timeoutMs, idempotencyKey: idemKey(req), origin: 'run',
+          provider: b.provider === undefined ? undefined : str(b.provider, 'provider'), accountId: b.accountId === undefined ? undefined : str(b.accountId, 'accountId') });
+        if (r.kind === 'queued') return send(res, 202, { queued: true, item: r.item, reason: r.reason });
+        return send(res, 202, { ...r.run, routing: r.decision && { mode: r.decision.mode, model: r.decision.model, tier: r.decision.tier, reason: r.decision.reason, policyVersion: r.decision.policyVersion } });
       }
       // ---- memory: project-wide and per-session, kept separate
       if (parts[0] === 'projects' && parts[2] === 'memory') {
@@ -226,20 +246,25 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         if (parts[2] === 'resume-check' && m === 'GET') return send(res, 200, resumer.check(session.id));
         if (parts[2] === 'resume' && m === 'POST') {
           const b = await readJson(req);
-          const model = str(b.model, 'model'); if (!MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+          const model = b.model === undefined || b.model === '' || b.model === 'auto' ? undefined : str(b.model, 'model');
+          if (model !== undefined && !MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
           if (b.mode !== undefined && !['portable', 'native'].includes(b.mode)) throw new HttpError(400, 'mode must be portable or native');
           const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
           if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
-          const r = resumer.resume(session.id, { model, mode: b.mode, timeoutMs, idempotencyKey: idemKey(req) });
-          return send(res, r.replayed ? 200 : 202, r);
+          const r = resumer.resume(session.id, { model, mode: b.mode, timeoutMs, idempotencyKey: idemKey(req),
+            provider: b.provider === undefined ? undefined : str(b.provider, 'provider'), accountId: b.accountId === undefined ? undefined : str(b.accountId, 'accountId') });
+          return send(res, r.queued ? 202 : r.replayed ? 200 : 202, r);
         }
       }
       if (parts[0] === 'runs' && parts.length === 2 && m === 'GET') {
         const r = need(supervisor.status(parts[1]), 'run');
         const task = store.getTask(r.taskId)!;
         const resultEvent = store.listEvents(task.sessionId).find((e) => e.runId === r.id && e.type === 'agent.result');
-        const costUsd = resultEvent?.payload.costUsd;
-        return send(res, 200, { ...r, active: supervisor.isActive(r.id), sessionId: task.sessionId,
+        const costUsd = resultEvent?.payload.costUsd; const u = store.getUsage(r.id);
+        const cost = router.costOf({ runId: r.id, taskId: r.taskId, sessionId: task.sessionId, projectId: '', provider: r.provider, model: r.model, role: r.role, status: r.status, startedAt: r.startedAt ?? '', costUsd: u?.costUsd ?? null, inputTokens: null, outputTokens: null, reported: u?.costUsd != null }, router.active().policy);
+        return send(res, 200, { ...r, active: supervisor.isActive(r.id), sessionId: task.sessionId, routing: routeInfo(r.id),
+          cost: { usd: cost.usd, source: cost.source, note: cost.source === 'reported' ? undefined : 'an estimate from the routing policy: the provider reported no cost' },
+          tokens: u && (u.inputTokens !== null || u.outputTokens !== null) ? { input: u.inputTokens, output: u.outputTokens } : null,
           usage: typeof costUsd === 'number' ? { costUsd, source: 'reported' } : { source: 'unavailable' },
           artifacts: store.listArtifacts(task.sessionId).filter((a) => a.runId === r.id).map((a) => ({ id: a.id, kind: a.kind, createdAt: a.createdAt, bytes: a.content?.length ?? 0 })) });
       }
@@ -254,10 +279,52 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         if (!art) throw new HttpError(404, 'log not available yet (run still active?)');
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); return void res.end(art.content ?? '');
       }
+      // ---- Phase 7: routing policy, budgets, usage
+      if (url.pathname === '/routing/policy') {
+        if (m === 'GET') { const a = router.active(); return send(res, 200, { version: a.version, policy: a.policy, versions: store.listPolicies().map((v) => ({ version: v.version, note: v.note, createdBy: v.createdBy, createdAt: v.createdAt })) }); }
+        if (m === 'PUT' || m === 'POST') { const b = await readJson(req); const v = router.publish(b.policy, 'user', typeof b.note === 'string' ? b.note.slice(0, 200) : undefined); return send(res, 201, { version: v.version, policy: v.config }); }
+      }
+      if (m === 'GET' && url.pathname === '/routing/today') return send(res, 200, router.today());
+      if (m === 'GET' && url.pathname === '/usage/summary') {
+        const pid = url.searchParams.get('projectId') ?? undefined; if (pid) need(store.getProject(pid), 'project');
+        return send(res, 200, router.summary({ days: Number(url.searchParams.get('days') ?? 7) || 7, projectId: pid }));
+      }
+      if (m === 'GET' && parts[0] === 'tasks' && parts[2] === 'route-preview') {
+        need(store.getTask(parts[1]), 'task'); const model = url.searchParams.get('model') || undefined;
+        if (model && !MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+        return send(res, 200, scheduler.preview(parts[1], model));
+      }
+      if (m === 'GET' && parts[0] === 'routing' && parts[1] === 'decisions' && parts[3] === 'replay') return send(res, 200, router.replay(parts[2]));
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'routing') {
+        need(store.getSession(parts[1]), 'session'); return send(res, 200, store.listRunsForSession(parts[1]).map((r) => ({ runId: r.id, status: r.status, model: r.model, provider: r.provider, decisions: routeInfo(r.id) })));
+      }
+
+      // ---- Phase 8: providers, accounts, queue, handoff, audit
+      if (m === 'GET' && url.pathname === '/providers') return send(res, 200, { providers: providers.overview(), queued: store.listQueue('queued').length });
+      if (m === 'POST' && url.pathname === '/providers/accounts') {
+        const b = await readJson(req);
+        return send(res, 201, providers.addAccount({ provider: str(b.provider, 'provider'), label: str(b.label, 'label'), configDir: typeof b.configDir === 'string' ? b.configDir : undefined,
+          credentialRef: typeof b.credentialRef === 'string' ? b.credentialRef : undefined, priority: b.priority }));
+      }
+      if (m === 'POST' && parts[0] === 'providers' && parts[1] === 'accounts' && parts[3] === 'enabled') {
+        const b = await readJson(req); if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled must be true or false');
+        return send(res, 200, providers.setEnabled(parts[2], b.enabled));
+      }
+      if (m === 'GET' && url.pathname === '/queue') return send(res, 200, store.listQueue());
+      if (m === 'POST' && url.pathname === '/queue/drain') return send(res, 200, scheduler.drain());
+      if (m === 'POST' && parts[0] === 'queue' && parts[2] === 'cancel') return send(res, 200, scheduler.cancelQueued(parts[1]));
+      if (m === 'GET' && url.pathname === '/audit') return send(res, 200, store.listAudit(Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 500)));
+      if (parts[0] === 'sessions' && parts[2] === 'handoffs' && m === 'GET') { need(store.getSession(parts[1]), 'session'); return send(res, 200, store.listHandoffs(parts[1])); }
+      if (parts[0] === 'sessions' && parts[2] === 'handoff' && m === 'POST') {
+        need(store.getSession(parts[1]), 'session'); if (!handoffs) throw new HttpError(501, 'checkpoints are not enabled');
+        const b = await readJson(req); const model = str(b.model, 'model'); if (!MODEL_RE.test(model)) throw new HttpError(400, 'invalid model');
+        const r = await handoffs.handoff(parts[1], { toProvider: str(b.provider, 'provider'), toAccountId: b.accountId === undefined ? undefined : str(b.accountId, 'accountId'), model, reason: str(b.reason, 'reason'), timeoutMs: b.timeoutMs === undefined ? undefined : Number(b.timeoutMs) });
+        return send(res, 202, r);
+      }
       throw new HttpError(404, 'not found');
     } catch (e: any) {
       if (e instanceof HttpError || e instanceof MemoryError) return send(res, e.status, { error: e.message });
-      if (e instanceof WorktreeError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof WorktreeError || e instanceof RoutingError || e instanceof ProviderError || e instanceof HandoffError) return send(res, e.status, { error: e.message, details: e.details });
       if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError || e instanceof WrongWorkdirError) return send(res, 409, { error: e.message });
       if (e instanceof ResumeError) return send(res, 409, { error: e.message, drift: e.drift });
       if (e instanceof InvalidTransitionError) return send(res, 409, { error: e.message });
@@ -265,4 +332,9 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });
+  if (opts.drainIntervalMs) {
+    const t = setInterval(() => { try { scheduler.drain(); } catch (e) { console.error('queue drain failed', e); } }, opts.drainIntervalMs);
+    t.unref(); server.on('close', () => clearInterval(t));
+  }
+  return server;
 }

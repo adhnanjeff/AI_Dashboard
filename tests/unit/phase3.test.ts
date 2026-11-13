@@ -395,7 +395,7 @@ test('EXIT CRITERIA: server process is hard-killed mid-run; after restart the se
   const project = (await s1.call('POST', '/projects', { name: 'crash', repoPath: repo })).json;
   const session = (await s1.call('POST', '/sessions', { projectId: project.id, title: 'crash test' })).json;
   const task = (await s1.call('POST', `/sessions/${session.id}/tasks`, { description: 'create work.txt then part2.txt', acceptanceCriteria: ['both exist'] })).json;
-  const run = (await s1.call('POST', `/tasks/${task.id}/runs`, { model: 'm' })).json;
+  const run = (await s1.call('POST', `/tasks/${task.id}/runs`, { model: 'claude-haiku-5-5' })).json;
   assert.equal(run.status, 'running');
   await until(() => existsSync(join(repo, 'work.txt')));
   // wait until a checkpoint that already contains the unfinished work has been persisted
@@ -424,9 +424,9 @@ test('EXIT CRITERIA: server process is hard-killed mid-run; after restart the se
     const check = (await s2.call('GET', `/sessions/${session.id}/resume-check`)).json;
     assert.equal(check.drift.level, 'unchanged');
 
-    const r1 = await s2.call('POST', `/sessions/${session.id}/resume`, { model: 'm' }, { 'idempotency-key': 'crash-resume-1' });
+    const r1 = await s2.call('POST', `/sessions/${session.id}/resume`, { model: 'claude-haiku-5-5' }, { 'idempotency-key': 'crash-resume-1' });
     assert.equal(r1.status, 202);
-    const r2 = await s2.call('POST', `/sessions/${session.id}/resume`, { model: 'm' }, { 'idempotency-key': 'crash-resume-1' });
+    const r2 = await s2.call('POST', `/sessions/${session.id}/resume`, { model: 'claude-haiku-5-5' }, { 'idempotency-key': 'crash-resume-1' });
     assert.equal(r2.status, 200); assert.equal(r2.json.run.id, r1.json.run.id, 'retried resume does not start a second worker');
     const resumedId = r1.json.run.id;
     const end = Date.now() + 8000; let final: any;
