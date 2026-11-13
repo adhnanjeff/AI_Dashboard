@@ -1,16 +1,16 @@
 /* ------------------------------------------------------------------ tokens */
 :root {
   color-scheme: light;
-  --bg: #f3f4fa; --glow1: rgba(99, 102, 241, .14); --glow2: rgba(14, 165, 233, .10);
-  --panel: #ffffff; --panel-2: #f6f7fc; --panel-3: #eceef8; --sidebar: rgba(255, 255, 255, .78);
-  --border: #e2e5f0; --border-strong: #cfd4e6;
-  --text: #141729; --muted: #626b82; --faint: #8a92a8;
-  --accent: #4f46e5; --accent-2: #7c3aed; --accent-text: #ffffff; --accent-soft: rgba(79, 70, 229, .10); --ring: rgba(79, 70, 229, .32);
-  --good: #15803d; --good-bg: rgba(22, 163, 74, .13); --bad: #c62828; --bad-bg: rgba(239, 68, 68, .12);
-  --warn: #a15c00; --warn-bg: rgba(245, 158, 11, .16); --info: #3b49d8; --info-bg: rgba(79, 70, 229, .10); --mute-bg: rgba(100, 116, 139, .12);
-  --add-bg: rgba(34, 197, 94, .13); --del-bg: rgba(239, 68, 68, .12);
-  --shadow-sm: 0 1px 2px rgba(20, 23, 41, .05), 0 1px 1px rgba(20, 23, 41, .03);
-  --shadow-md: 0 8px 24px -8px rgba(30, 35, 80, .16), 0 2px 6px rgba(20, 23, 41, .05);
+  --bg: #f1faee; --glow1: rgba(168, 218, 220, .55); --glow2: rgba(69, 123, 157, .14);
+  --panel: #ffffff; --panel-2: #f6fcf4; --panel-3: #e2f1ea; --sidebar: rgba(241, 250, 238, .82);
+  --border: #d3e6df; --border-strong: #a8dadc;
+  --text: #1d3557; --muted: #4f6882; --faint: #7a8fa6;
+  --accent: #457b9d; --accent-2: #1d3557; --accent-text: #ffffff; --accent-soft: rgba(69, 123, 157, .13); --ring: rgba(69, 123, 157, .38);
+  --good: #15803d; --good-bg: rgba(22, 163, 74, .13); --bad: #c9252f; --bad-bg: rgba(230, 57, 70, .12);
+  --warn: #a15c00; --warn-bg: rgba(245, 158, 11, .16); --info: #2f6486; --info-bg: rgba(69, 123, 157, .13); --mute-bg: rgba(29, 53, 87, .08);
+  --add-bg: rgba(34, 197, 94, .13); --del-bg: rgba(230, 57, 70, .12);
+  --shadow-sm: 0 1px 2px rgba(29, 53, 87, .06), 0 1px 1px rgba(29, 53, 87, .04);
+  --shadow-md: 0 8px 24px -8px rgba(29, 53, 87, .18), 0 2px 6px rgba(29, 53, 87, .06);
   --radius: 14px; --radius-sm: 10px;
   --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, 'Liberation Mono', monospace;
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable', 'Segoe UI', Roboto, sans-serif;
@@ -18,27 +18,27 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --bg: #0a0c12; --glow1: rgba(99, 102, 241, .20); --glow2: rgba(56, 189, 248, .09);
-    --panel: #11141c; --panel-2: #161a24; --panel-3: #1d2230; --sidebar: rgba(14, 17, 25, .78);
-    --border: #212636; --border-strong: #2e3550;
-    --text: #e9ebf3; --muted: #98a0b5; --faint: #6c748b;
-    --accent: #8b93ff; --accent-2: #b38bff; --accent-text: #0a0c12; --accent-soft: rgba(139, 147, 255, .14); --ring: rgba(139, 147, 255, .38);
-    --good: #4ade80; --good-bg: rgba(74, 222, 128, .13); --bad: #ff8a8a; --bad-bg: rgba(248, 113, 113, .14);
-    --warn: #fbbf24; --warn-bg: rgba(251, 191, 36, .13); --info: #a5acff; --info-bg: rgba(139, 147, 255, .14); --mute-bg: rgba(148, 163, 184, .12);
-    --add-bg: rgba(74, 222, 128, .12); --del-bg: rgba(248, 113, 113, .13);
+    --bg: #0c192b; --glow1: rgba(69, 123, 157, .28); --glow2: rgba(168, 218, 220, .08);
+    --panel: #12253f; --panel-2: #172d4b; --panel-3: #1d3557; --sidebar: rgba(12, 25, 43, .82);
+    --border: #25406a; --border-strong: #35587f;
+    --text: #f1faee; --muted: #a8c4cf; --faint: #7391a3;
+    --accent: #a8dadc; --accent-2: #78b4c6; --accent-text: #0c192b; --accent-soft: rgba(168, 218, 220, .14); --ring: rgba(168, 218, 220, .40);
+    --good: #4ade80; --good-bg: rgba(74, 222, 128, .13); --bad: #ff7b86; --bad-bg: rgba(230, 57, 70, .18);
+    --warn: #fbbf24; --warn-bg: rgba(251, 191, 36, .13); --info: #a8dadc; --info-bg: rgba(168, 218, 220, .14); --mute-bg: rgba(168, 218, 220, .10);
+    --add-bg: rgba(74, 222, 128, .12); --del-bg: rgba(230, 57, 70, .16);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35); --shadow-md: 0 12px 32px -12px rgba(0, 0, 0, .6), 0 2px 6px rgba(0, 0, 0, .3);
   }
 }
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #0a0c12; --glow1: rgba(99, 102, 241, .20); --glow2: rgba(56, 189, 248, .09);
-  --panel: #11141c; --panel-2: #161a24; --panel-3: #1d2230; --sidebar: rgba(14, 17, 25, .78);
-  --border: #212636; --border-strong: #2e3550;
-  --text: #e9ebf3; --muted: #98a0b5; --faint: #6c748b;
-  --accent: #8b93ff; --accent-2: #b38bff; --accent-text: #0a0c12; --accent-soft: rgba(139, 147, 255, .14); --ring: rgba(139, 147, 255, .38);
-  --good: #4ade80; --good-bg: rgba(74, 222, 128, .13); --bad: #ff8a8a; --bad-bg: rgba(248, 113, 113, .14);
-  --warn: #fbbf24; --warn-bg: rgba(251, 191, 36, .13); --info: #a5acff; --info-bg: rgba(139, 147, 255, .14); --mute-bg: rgba(148, 163, 184, .12);
-  --add-bg: rgba(74, 222, 128, .12); --del-bg: rgba(248, 113, 113, .13);
+  --bg: #0c192b; --glow1: rgba(69, 123, 157, .28); --glow2: rgba(168, 218, 220, .08);
+  --panel: #12253f; --panel-2: #172d4b; --panel-3: #1d3557; --sidebar: rgba(12, 25, 43, .82);
+  --border: #25406a; --border-strong: #35587f;
+  --text: #f1faee; --muted: #a8c4cf; --faint: #7391a3;
+  --accent: #a8dadc; --accent-2: #78b4c6; --accent-text: #0c192b; --accent-soft: rgba(168, 218, 220, .14); --ring: rgba(168, 218, 220, .40);
+  --good: #4ade80; --good-bg: rgba(74, 222, 128, .13); --bad: #ff7b86; --bad-bg: rgba(230, 57, 70, .18);
+  --warn: #fbbf24; --warn-bg: rgba(251, 191, 36, .13); --info: #a8dadc; --info-bg: rgba(168, 218, 220, .14); --mute-bg: rgba(168, 218, 220, .10);
+  --add-bg: rgba(74, 222, 128, .12); --del-bg: rgba(230, 57, 70, .16);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35); --shadow-md: 0 12px 32px -12px rgba(0, 0, 0, .6), 0 2px 6px rgba(0, 0, 0, .3);
 }
 
@@ -195,3 +195,13 @@ pre.log { background: var(--panel-2); border: 1px solid var(--border); border-ra
 ul.notes { list-style: none; margin: 6px 0 14px; padding: 0; display: grid; gap: 10px; }
 ul.notes li { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: var(--radius-sm); padding: 10px 14px; display: grid; gap: 6px; }
 .card h2 + .muted { margin-top: -4px; }
+
+/* ---- Phase 7/8: usage meter, legends, plain lists */
+.meter { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: var(--panel-3); border: 1px solid var(--border); margin: 10px 0 6px; }
+.meter span { display: block; height: 100%; }
+.m-reported { background: var(--accent); }
+.m-estimated { background: repeating-linear-gradient(45deg, var(--warn), var(--warn) 4px, color-mix(in srgb, var(--warn) 45%, transparent) 4px, color-mix(in srgb, var(--warn) 45%, transparent) 8px); }
+.m-reserved { background: var(--info); opacity: .55; }
+.legend { list-style: none; display: grid; gap: 4px; padding: 0; margin: 4px 0 0; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+ul.plain { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 10px; }

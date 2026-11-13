@@ -6,4 +6,7 @@ export const MODELS = [
 ];
 export const PROJECT_CATEGORIES = ['architecture', 'conventions', 'decisions', 'known-issues', 'instructions'] as const;
 export const SESSION_CATEGORIES = ['decisions', 'rejected', 'questions', 'notes'] as const;
-export const DEFAULT_MODEL = MODELS[0].id;
+// 'auto' = no model sent: the routing policy chooses and explains why. Anything else is a manual choice (still budget-checked and logged).
+export const AUTO_MODEL = 'auto';
+export const MODEL_CHOICES = [{ id: AUTO_MODEL, label: 'Auto — let the routing policy choose' }, ...MODELS];
+export const DEFAULT_MODEL = AUTO_MODEL;

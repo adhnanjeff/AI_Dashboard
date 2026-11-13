@@ -11,6 +11,7 @@ export interface Run {
 export interface RunDetail extends Run {
   active: boolean; sessionId: string;
   usage: { costUsd?: number; source: 'reported' | 'unavailable' };
+  cost?: RunCost; tokens?: { input: number | null; output: number | null } | null; routing?: RoutingInfo[];
   artifacts: { id: string; kind: string; createdAt: string; bytes: number }[];
 }
 export interface SessionSummary {
@@ -47,3 +48,39 @@ export interface Changes {
   files: { path: string; untracked: boolean }[]; diff: string; diffTruncated: boolean; computedAt: string;
   checkpoint: { id: string; seq: number; createdAt: string; matchesNow: boolean } | null;
 }
+
+// ---- Phase 7: routing, usage, budgets
+export interface RoutingInfo { id: string; provider: string; model: string; policyVersion: string; reason: string; createdAt: string; inputs: Record<string, any> }
+export interface RunCost { usd: number; source: 'reported' | 'estimated' | 'reserved'; note?: string }
+export interface BudgetToday {
+  policyVersion: number; since: string; limitUsd: number; perTaskLimitUsd: number; totalUsd: number; remainingUsd: number;
+  bySource: { reported: number; estimated: number; reserved: number };
+}
+export interface ModelUsage { model: string; tier: string | null; runs: number; completed: number; failed: number; cancelled: number; running: number; costUsd: number; reportedRuns: number; estimatedRuns: number; successRate: number | null; costPerCompletedRun: number | null }
+export interface UsageSummary {
+  days: number; since: string; policyVersion: number; runs: number; totalUsd: number; bySource: { reported: number; estimated: number; reserved: number };
+  tokens: { input: number; output: number; note: string };
+  byModel: ModelUsage[];
+  acceptedTasks: { count: number; costUsd: number; costPerAcceptedTask: number | null; tasksWithRuns: number };
+  escalation: { decisions: number; escalated: number; manualOverrides: number; escalatedCompleted: number; escalatedFailed: number; paths: { from: string; to: string; runs: number; completed: number; failed: number }[] };
+}
+export interface PolicyRule { id: string; tier: string; reason: string; types?: string[]; minComplexity?: string; maxComplexity?: string; minRisk?: string; maxRisk?: string }
+export interface RoutingPolicy {
+  models: Record<string, string>; rules: PolicyRule[]; defaultTier: string;
+  escalation: { afterFailures: number; maxTier: string; maxAttemptsPerTask: number };
+  budgets: { perTaskUsd: number; dailyUsd: number; estimateUsd: Record<string, number> };
+  extractionFirst: { enabled: boolean; minDescriptionChars: number };
+}
+export interface PolicyResponse { version: number; policy: RoutingPolicy; versions: { version: number; note: string | null; createdBy: string; createdAt: string }[] }
+
+// ---- Phase 8: providers, accounts, queue, handoff, audit
+export interface ProviderCaps { displayName: string; models: string[]; supportsNativeResume: boolean; canEditFiles: boolean; credentialEnv?: string; configDirEnv?: string }
+export interface ProviderAccount { id: string; provider: string; label: string; configDir: string | null; credentialRef: string | null; priority: number; enabled: boolean; lastUsedAt: string | null }
+export interface ProviderView {
+  provider: string; capabilities: ProviderCaps | null; mode: 'default-login' | 'registered-accounts';
+  accounts: { account: ProviderAccount | null; health: { limitedUntil: string | null; lastError: string | null; consecutiveFailures: number; lastOutcome: string | null } | null; availability: { available: boolean; until?: string; reason?: string } }[];
+}
+export interface QueueItem { id: string; taskId: string; sessionId: string; status: 'queued' | 'started' | 'cancelled' | 'abandoned'; reason: string; attempts: number; runId: string | null; createdAt: string }
+export interface HandoffRec { id: string; fromProvider: string | null; toProvider: string; toModel: string; toRunId: string | null; status: 'started' | 'queued' | 'refused'; reason: string; notes: string[]; driftLevel: string | null; actor: string; createdAt: string }
+export interface AuditEntry { id: number; at: string; actor: string; action: string; subject: string; details: Record<string, unknown> }
+export interface SessionRouting { runId: string; status: string; model: string; provider: string; decisions: RoutingInfo[] }

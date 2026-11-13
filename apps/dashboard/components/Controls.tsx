@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { api, newIdempotencyKey } from '../lib/api.ts';
-import { DEFAULT_MODEL, MODELS } from '../lib/models.ts';
+import { DEFAULT_MODEL, MODEL_CHOICES } from '../lib/models.ts';
 import { availableActions } from '../lib/status.ts';
 import type { Drift, Run, SessionDetail } from '../lib/types.ts';
 
@@ -40,7 +40,7 @@ export default function Controls({ detail, runs, onChanged }: Props) {
   const modelSelect = (
     <label className="row small">Model
       <select value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 'auto' }} aria-label="Model">
-        {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        {MODEL_CHOICES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
       </select>
     </label>
   );

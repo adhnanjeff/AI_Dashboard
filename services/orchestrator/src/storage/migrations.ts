@@ -131,4 +131,69 @@ CREATE UNIQUE INDEX idx_worktree_path_active ON worktree(path) WHERE status = 'a
 CREATE INDEX idx_worktree_project ON worktree(project_id, status);
 `,
   },
+  {
+    version: 5,
+    sql: `
+-- Phase 7: versioned routing policy, per-run usage, and the inputs each routing decision was made from.
+ALTER TABLE routing_decision ADD COLUMN inputs TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE routing_policy (
+  version INTEGER PRIMARY KEY, config TEXT NOT NULL, note TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER routing_policy_no_update BEFORE UPDATE ON routing_policy BEGIN SELECT RAISE(ABORT, 'a policy version is immutable; publish a new version'); END;
+CREATE TRIGGER routing_policy_no_delete BEFORE DELETE ON routing_policy BEGIN SELECT RAISE(ABORT, 'policy versions are never deleted'); END;
+-- One row per run, written only when the provider reported something. A missing row means "unavailable".
+CREATE TABLE usage_record (
+  run_id TEXT PRIMARY KEY REFERENCES agent_run(id),
+  session_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  provider TEXT NOT NULL, model TEXT NOT NULL,
+  input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,
+  source TEXT NOT NULL CHECK (source IN ('reported')), created_at TEXT NOT NULL
+);
+CREATE INDEX idx_usage_created ON usage_record(created_at);
+CREATE INDEX idx_usage_project ON usage_record(project_id, created_at);
+`,
+  },
+  {
+    version: 6,
+    sql: `
+-- Phase 8: authorized provider accounts (references only, never secrets), health, queue, handoffs, audit trail.
+ALTER TABLE agent_run ADD COLUMN account_id TEXT;
+CREATE TABLE provider_account (
+  id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
+  config_dir TEXT, credential_ref TEXT,
+  priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+  last_used_at TEXT, created_at TEXT NOT NULL,
+  UNIQUE (provider, label)
+);
+-- account_id '' is the implicit default account (the CLI's own login).
+CREATE TABLE provider_health (
+  provider TEXT NOT NULL, account_id TEXT NOT NULL DEFAULT '',
+  limited_until TEXT, last_error TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_outcome TEXT, updated_at TEXT NOT NULL,
+  PRIMARY KEY (provider, account_id)
+);
+CREATE TABLE queue_item (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id), session_id TEXT NOT NULL REFERENCES session(id),
+  request TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('queued','started','cancelled','abandoned')),
+  reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, run_id TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_queue_status ON queue_item(status, created_at);
+CREATE TABLE handoff (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id),
+  from_run_id TEXT, from_provider TEXT, from_account_id TEXT,
+  to_provider TEXT NOT NULL, to_account_id TEXT, to_model TEXT NOT NULL, to_run_id TEXT,
+  checkpoint_id TEXT, drift_level TEXT, fingerprint TEXT,
+  status TEXT NOT NULL CHECK (status IN ('started','queued','refused')),
+  reason TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '[]', actor TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX idx_handoff_session ON handoff(session_id, created_at);
+CREATE TABLE audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
+  subject TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+`,
+  },
 ];

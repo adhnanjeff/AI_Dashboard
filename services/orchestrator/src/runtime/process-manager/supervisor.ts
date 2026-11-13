@@ -5,14 +5,24 @@ import type { AgentRun } from '../../domain/types.ts';
 import type { CheckpointService } from '../../checkpoints/checkpoint-service.ts';
 import type { Store } from '../../storage/store.ts';
 import type { AdapterProcess, NormalizedEvent, ProviderAdapter } from '../adapters/types.ts';
+import type { ProviderHealthService } from '../../providers/health.ts';
+import { ProviderRegistry } from '../../providers/registry.ts';
 
 export interface StartInput {
   taskId: string; prompt: string; cwd: string; model: string;
   role?: string; timeoutMs?: number; resumeId?: string;
   /** A retried request with the same key returns the original run instead of starting another. */
   idempotencyKey?: string;
+  /** Which registered adapter runs this (default: the first registered). */
+  provider?: string;
+  /** Registered account the run is attributed to. */
+  accountId?: string;
+  /** Extra environment for this launch only (account profile / credential). Never stored. */
+  env?: Record<string, string>;
 }
 export interface SupervisorOptions {
+  /** Records what each provider reports about itself (rate limits, errors) so work is not sent to a limited account. */
+  health?: ProviderHealthService;
   defaultTimeoutMs?: number; logCapBytes?: number;
   checkpoints?: CheckpointService;
   /** Minimum gap between mid-run checkpoints. 0 = after every successful tool call. Default 5000. */
@@ -39,12 +49,12 @@ export const lockKey = (cwd: string) => { const p = resolve(cwd).replace(/[\\/]+
 // result. A started process, or a final-looking message, is never treated as success.
 export class Supervisor {
   readonly checkpoints?: CheckpointService;
-  private store: Store; private adapter: ProviderAdapter;
+  private store: Store; readonly registry: ProviderRegistry; readonly health?: ProviderHealthService;
   private defaultTimeoutMs: number; private logCap: number; private cpInterval: number;
   private active = new Map<string, Active>();
 
-  constructor(store: Store, adapter: ProviderAdapter, opts: SupervisorOptions = {}) {
-    this.store = store; this.adapter = adapter;
+  constructor(store: Store, adapter: ProviderAdapter | ProviderRegistry, opts: SupervisorOptions = {}) {
+    this.store = store; this.registry = ProviderRegistry.of(adapter); this.health = opts.health;
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 10 * 60_000;
     this.logCap = opts.logCapBytes ?? 5 * 1024 * 1024;
     this.checkpoints = opts.checkpoints; this.cpInterval = opts.checkpointIntervalMs ?? 5000;
@@ -54,6 +64,9 @@ export class Supervisor {
   start(input: StartInput): AgentRun {
     const task = this.store.getTask(input.taskId); if (!task) throw new Error(`task not found: ${input.taskId}`);
     const session = this.store.getSession(task.sessionId)!;
+    const adapter: ProviderAdapter | undefined = input.provider ? this.registry.get(input.provider) : this.registry.default;
+    if (!adapter) throw new Error(`provider not registered: ${input.provider}`);
+    const accountKey = input.accountId ?? '';
 
     if (input.idempotencyKey) {
       const prior = this.store.getRunByKey(input.idempotencyKey);
@@ -83,15 +96,16 @@ export class Supervisor {
     this.activate(task.status, (to) => this.store.transitionTask(task.id, to), 'task');
 
     const cliSessionId = input.resumeId ?? randomUUID();
-    const run = this.store.createRun({ taskId: task.id, role: input.role ?? 'coder', provider: this.adapter.provider, model: input.model, idempotencyKey: input.idempotencyKey });
+    const run = this.store.createRun({ taskId: task.id, role: input.role ?? 'coder', provider: adapter.provider, model: input.model, idempotencyKey: input.idempotencyKey, accountId: input.accountId });
     if (this.store.acquireWorktreeLock(lockPath, session.id, run.id)) throw new WorktreeBusyError('working directory lock was taken concurrently');
 
     // Persist state BEFORE launching work, so a crash right after launch is still recoverable.
     this.checkpoint(session.id, run.id, input.cwd, 'before-launch', `Start the task: ${task.description}`);
 
     let proc: AdapterProcess;
-    try { proc = this.adapter.launch({ cwd: input.cwd, prompt: input.prompt, model: input.model, cliSessionId, resumeId: input.resumeId }); }
+    try { proc = adapter.launch({ cwd: input.cwd, prompt: input.prompt, model: input.model, cliSessionId, resumeId: input.resumeId, env: input.env }); }
     catch (e: any) {
+      this.health?.recordError(adapter.provider, accountKey, `launch error: ${e.message}`);
       this.store.transitionRun(run.id, 'running', { cliSessionId });
       this.settle(run.id, 'failed', { reason: `launch error: ${e.message}` }, input.cwd);
       return this.store.getRun(run.id)!;
@@ -100,6 +114,7 @@ export class Supervisor {
 
     const entry: Active = { runId: run.id, sessionId: session.id, proc, cancelled: false, timedOut: false, finished: undefined as any };
     const log: string[] = []; let logBytes = 0; let truncated = false; let result: Extract<NormalizedEvent, { kind: 'result' }> | undefined;
+    let limited: Extract<NormalizedEvent, { kind: 'rate_limit' }> | undefined;
     let lastCp = Date.now();
     const addLog = (s: string) => {
       if (logBytes >= this.logCap) { truncated = true; return; }
@@ -119,6 +134,10 @@ export class Supervisor {
           this.checkpoint(sessionId, run.id, input.cwd, 'progress', `Continue the task: ${task.description}`);
         }
       }
+      else if (ev.kind === 'rate_limit') {
+        if (!limited) this.store.appendEvent({ sessionId, runId: run.id, type: 'provider.rate_limited', payload: { text: ev.text.slice(0, 300), resetsAt: ev.resetsAt ?? null } });
+        limited = limited ?? ev;
+      }
       else if (ev.kind === 'result') { result = ev; this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.result', payload: { ok: ev.ok, text: ev.text.slice(0, 2000), costUsd: ev.costUsd } }); }
       // `other` events (hooks, token counters, rate limits) stay in the log artifact only.
     });
@@ -135,10 +154,20 @@ export class Supervisor {
       else if (entry.timedOut) { to = 'failed'; reason = `timeout after ${timeoutMs}ms`; }
       else if (exit.spawnError) { to = 'failed'; reason = `spawn error: ${exit.spawnError}`; }
       else if (exit.exitCode === 0 && result?.ok) { to = 'completed'; reason = 'provider reported success'; }
+      else if (limited) { to = 'failed'; reason = `provider rate limited${limited.resetsAt ? ` (resets ${limited.resetsAt})` : ''}`; }
       else if (exit.exitCode !== 0) { to = 'failed'; reason = `exit code ${exit.exitCode ?? exit.signal}`; }
       else if (!result) { to = 'failed'; reason = 'exited 0 without a result event'; }
       else { to = 'failed'; reason = 'provider reported an error result'; }
       this.store.addArtifact({ sessionId: session.id, runId: run.id, kind: 'log', content: log.join('') });
+      // Only what the provider actually reported is recorded; a run with no report simply has no usage row.
+      if (result && (result.costUsd !== undefined || result.usage)) {
+        try { this.store.recordUsage({ runId: run.id, costUsd: result.costUsd, inputTokens: result.usage?.inputTokens, outputTokens: result.usage?.outputTokens }); } catch { /* accounting must never fail a run */ }
+      }
+      try {
+        if (to === 'completed') this.health?.recordSuccess(adapter.provider, accountKey);
+        else if (limited) this.health?.recordRateLimit(adapter.provider, accountKey, limited.resetsAt, limited.text);
+        else if (exit.spawnError) this.health?.recordError(adapter.provider, accountKey, reason);
+      } catch { /* health tracking must never fail a run */ }
       const done = this.settle(run.id, to, { exitCode: exit.exitCode ?? undefined, reason }, input.cwd);
       this.active.delete(run.id);
       return done;
@@ -149,6 +178,8 @@ export class Supervisor {
 
   status(runId: string) { return this.store.getRun(runId); }
   isActive(runId: string) { return this.active.has(runId); }
+  /** The run currently executing for a session, if any (a handoff must see this empty before the next worker writes). */
+  activeRunFor(sessionId: string): string | undefined { return [...this.active.values()].find((a) => a.sessionId === sessionId)?.runId; }
   findByKey(key: string) { return this.store.getRunByKey(key); }
   waitFor(runId: string): Promise<AgentRun> {
     const a = this.active.get(runId);

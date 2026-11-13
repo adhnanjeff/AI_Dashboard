@@ -50,7 +50,10 @@ export default function RunView({ id }: { id: string }) {
               <dt>Duration</dt><dd>{duration(r.startedAt, r.endedAt, now)}</dd>
               <dt>Process id</dt><dd>{r.pid ?? '—'}</dd>
               <dt>Provider session</dt><dd className="mono">{r.cliSessionId ?? '—'}</dd>
-              <dt>Cost</dt><dd>{r.usage.source === 'reported' && r.usage.costUsd !== undefined ? <>{usd(r.usage.costUsd)} <span className="muted small">(reported by the provider)</span></> : <span className="muted">not available</span>}</dd>
+              <dt>Cost</dt><dd>{r.usage.source === 'reported' && r.usage.costUsd !== undefined ? <>{usd(r.usage.costUsd)} <span className="muted small">(reported by the provider)</span></> : r.cost ? <>{usd(r.cost.usd)} <span className="muted small">({r.cost.source === 'reserved' ? 'reserved while running' : 'estimate'}: the provider reported no cost)</span></> : <span className="muted">not available</span>}</dd>
+              {r.tokens && <><dt>Tokens</dt><dd>{(r.tokens.input ?? 0).toLocaleString()} in / {(r.tokens.output ?? 0).toLocaleString()} out <span className="muted small">(reported)</span></dd></>}
+              <dt>Provider</dt><dd>{r.provider}</dd>
+              {r.routing?.[0] && <><dt>Why this model</dt><dd>{r.routing[0].reason} <span className="muted small">(policy v{r.routing[0].policyVersion})</span></dd></>}
             </dl>
             <h3 style={{ marginTop: 14 }}>Artifacts</h3>
             {r.artifacts.length === 0 ? <p className="muted small">None yet.</p> : (
