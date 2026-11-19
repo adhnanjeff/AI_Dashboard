@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import Header from '../components/Header.tsx';
 import Sidebar from '../components/Sidebar.tsx';
 import './globals.css';
 
@@ -14,6 +15,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <head><script dangerouslySetInnerHTML={{ __html: THEME_INIT }} /></head>
       <body>
         <a className="skip" href="#main">Skip to content</a>
+        <Header />
         <div className="shell">
           <aside className="sidebar" aria-label="Sidebar"><Sidebar /></aside>
           <main id="main" tabIndex={-1}>{children}</main>

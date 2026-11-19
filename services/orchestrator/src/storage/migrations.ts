@@ -196,4 +196,67 @@ CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABO
 CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 `,
   },
+  {
+    version: 7,
+    sql: `
+-- Phase 9: multi-agent workflows. Definition is immutable JSON; progress is per step; every transition and every piece of evidence is append-only.
+CREATE TABLE workflow (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), title TEXT NOT NULL, goal TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('draft','running','completed','failed','cancelled')),
+  halted_reason TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TRIGGER workflow_definition_fixed BEFORE UPDATE OF definition, goal, project_id ON workflow BEGIN SELECT RAISE(ABORT, 'a workflow definition cannot be changed after it is created'); END;
+CREATE TABLE workflow_step (
+  workflow_id TEXT NOT NULL REFERENCES workflow(id), key TEXT NOT NULL, kind TEXT NOT NULL, role TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending','running','waiting_approval','passed','failed','skipped','cancelled')),
+  attempts INTEGER NOT NULL DEFAULT 0, session_id TEXT, task_id TEXT, run_id TEXT, approval_id TEXT,
+  started_at TEXT, ended_at TEXT, detail TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (workflow_id, key)
+);
+CREATE TABLE workflow_transition (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL REFERENCES workflow(id), step_key TEXT,
+  from_status TEXT, to_status TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL
+);
+CREATE INDEX idx_wft_wf ON workflow_transition(workflow_id, id);
+CREATE TRIGGER wft_no_update BEFORE UPDATE ON workflow_transition BEGIN SELECT RAISE(ABORT, 'workflow history is append-only'); END;
+CREATE TRIGGER wft_no_delete BEFORE DELETE ON workflow_transition BEGIN SELECT RAISE(ABORT, 'workflow history is append-only'); END;
+CREATE TABLE workflow_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL REFERENCES workflow(id), step_key TEXT NOT NULL,
+  attempt INTEGER NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX idx_wfe_wf ON workflow_evidence(workflow_id, id);
+CREATE TRIGGER wfe_no_update BEFORE UPDATE ON workflow_evidence BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
+CREATE TRIGGER wfe_no_delete BEFORE DELETE ON workflow_evidence BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
+`,
+  },
+  {
+    version: 8,
+    sql: `
+-- Phase 10: repository index. The Phase 1 graph tables gain source locations; files get a content hash for staleness.
+ALTER TABLE knowledge_node ADD COLUMN path TEXT;
+ALTER TABLE knowledge_node ADD COLUMN line INTEGER;
+ALTER TABLE knowledge_node ADD COLUMN end_line INTEGER;
+ALTER TABLE knowledge_node ADD COLUMN meta TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE knowledge_node ADD COLUMN session_id TEXT;
+ALTER TABLE knowledge_edge ADD COLUMN project_id TEXT;
+ALTER TABLE knowledge_edge ADD COLUMN path TEXT;
+ALTER TABLE knowledge_edge ADD COLUMN line INTEGER;
+ALTER TABLE knowledge_edge ADD COLUMN evidence TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_kn_project ON knowledge_node(project_id, kind);
+CREATE INDEX idx_kn_path ON knowledge_node(project_id, path);
+CREATE UNIQUE INDEX idx_kn_name ON knowledge_node(project_id, kind, name);
+CREATE INDEX idx_ke_from ON knowledge_edge(from_id);
+CREATE INDEX idx_ke_to ON knowledge_edge(to_id);
+CREATE INDEX idx_ke_project ON knowledge_edge(project_id, kind);
+CREATE TABLE index_file (
+  project_id TEXT NOT NULL REFERENCES project(id), path TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL, mtime_ms INTEGER NOT NULL,
+  lang TEXT NOT NULL, indexed_at TEXT NOT NULL, PRIMARY KEY (project_id, path)
+);
+CREATE TABLE index_state (
+  project_id TEXT PRIMARY KEY REFERENCES project(id), revision TEXT, branch TEXT, extractor TEXT NOT NULL,
+  files INTEGER NOT NULL, symbols INTEGER NOT NULL, edges INTEGER NOT NULL, full_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_mode TEXT NOT NULL
+);
+`,
+  },
 ];

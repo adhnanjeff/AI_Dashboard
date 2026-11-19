@@ -1,6 +1,7 @@
 // Stand-in for the `claude` CLI. Behaviour is chosen with FAKE_SCENARIO; Claude's own flags are ignored.
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 const scenario = process.env.FAKE_SCENARIO ?? 'ok';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
@@ -15,7 +16,27 @@ const say = (text, tool) => out({ type: 'assistant', message: { content: [
 const toolResult = () => out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'File created', is_error: false }] } });
 const success = (text = 'DONE') => out({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 0.01 });
 
-if (scenario === 'ok') { init(); noise(); say('working', 'Write'); toolResult(); say('finished'); success(); process.exit(0); }
+if (scenario === 'directed') {
+  // Behaviour is written into the prompt as JSON lines: FAKE {"write":{"path":"a.txt","content":"x\n"},"when":"text","unless":"text","ifFile":"p","ifNoFile":"p","result":"text","fail":true,"sleep":300}
+  // Directive lines are removed before "when"/"unless" are matched, so a directive never matches itself.
+  init();
+  const prompt = process.argv[process.argv.indexOf('-p') + 1] ?? '';
+  const dirs = prompt.split('\n').filter((l) => l.startsWith('FAKE ')).map((l) => JSON.parse(l.slice(5)));
+  const text = prompt.split('\n').filter((l) => !l.startsWith('FAKE ')).join('\n');
+  let result = 'DONE', fail = false, sleep = 0;
+  for (const d of dirs) {
+    if (d.when && !text.includes(d.when)) continue;
+    if (d.unless && text.includes(d.unless)) continue;
+    if (d.ifFile && !existsSync(d.ifFile)) continue;
+    if (d.ifNoFile && existsSync(d.ifNoFile)) continue;
+    if (d.write) { mkdirSync(dirname(d.write.path) || '.', { recursive: true }); writeFileSync(d.write.path, d.write.content); }
+    if (d.result !== undefined) result = d.result;
+    if (d.fail) fail = true;
+    if (d.sleep) sleep = d.sleep;
+  }
+  say('working', 'Write'); toolResult();
+  setTimeout(() => { if (fail) out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'directed failure' }); else success(result); process.exit(0); }, sleep);
+} else if (scenario === 'ok') { init(); noise(); say('working', 'Write'); toolResult(); say('finished'); success(); process.exit(0); }
 if (scenario === 'usage') { init(); say('working', 'Write'); toolResult(); out({ type: 'result', subtype: 'success', is_error: false, result: 'DONE', total_cost_usd: Number(process.env.FAKE_COST ?? 0.25), usage: { input_tokens: 1200, output_tokens: 340 } }); process.exit(0); }
 if (scenario === 'nocost') { init(); say('working', 'Write'); toolResult(); out({ type: 'result', subtype: 'success', is_error: false, result: 'DONE' }); process.exit(0); }
 if (scenario === 'ratelimit') { init(); out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: process.env.FAKE_RESET_EPOCH ? Number(process.env.FAKE_RESET_EPOCH) : undefined } }); process.exit(1); }
@@ -39,6 +60,6 @@ if (scenario === 'edit-then-hang') {
   const gc = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   if (process.env.FAKE_PIDFILE) writeFileSync(process.env.FAKE_PIDFILE, String(gc.pid));
   setInterval(() => {}, 1000); // hang until killed
-} else if (!['ok', 'fail', 'noresult', 'errresult', 'secret', 'edit-then-hang', 'record-prompt', 'usage', 'nocost', 'ratelimit', 'ratelimit-result'].includes(scenario)) {
+} else if (!['ok', 'fail', 'noresult', 'errresult', 'secret', 'edit-then-hang', 'record-prompt', 'usage', 'nocost', 'ratelimit', 'ratelimit-result', 'directed'].includes(scenario)) {
   console.error('unknown scenario ' + scenario); process.exit(64);
 }
