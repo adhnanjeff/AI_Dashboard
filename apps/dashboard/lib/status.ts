@@ -6,8 +6,8 @@ export type Tone = 'good' | 'bad' | 'warn' | 'info' | 'muted';
 export const STATE_META: Record<WorkState, { label: string; glyph: string; tone: Tone }> = {
   queued: { label: 'Queued', glyph: '○', tone: 'muted' },
   running: { label: 'Running', glyph: '●', tone: 'info' },
-  paused: { label: 'Paused', glyph: '⏸', tone: 'warn' },
-  blocked: { label: 'Blocked', glyph: '⛔', tone: 'warn' },
+  paused: { label: 'Paused', glyph: '‖', tone: 'warn' },
+  blocked: { label: 'Blocked', glyph: '■', tone: 'warn' },
   failed: { label: 'Failed', glyph: '✕', tone: 'bad' },
   completed: { label: 'Completed', glyph: '✓', tone: 'good' },
   cancelled: { label: 'Cancelled', glyph: '⊘', tone: 'muted' },

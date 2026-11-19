@@ -14,6 +14,10 @@ import { Scheduler } from '../routing/scheduler.ts';
 import { ProviderError, ProviderService } from '../providers/accounts.ts';
 import { ProviderHealthService } from '../providers/health.ts';
 import { HandoffError, HandoffService } from '../providers/handoff-service.ts';
+import { WorkflowEngine, WorkflowError } from '../workflows/engine.ts';
+import { IndexError, RepoIndex } from '../indexing/indexer.ts';
+import { buildFactorySnapshot } from '../factory/snapshot.ts';
+import { ROLES, featureTemplate } from '../workflows/definition.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
 
@@ -52,6 +56,10 @@ export interface ApiOptions {
   env?: NodeJS.ProcessEnv;
   /** If set, queued work is offered capacity this often. Off by default (tests call /queue/drain themselves). */
   drainIntervalMs?: number;
+  /** If set, running workflows are advanced this often. Off by default (tests call tick() themselves). */
+  workflowIntervalMs?: number;
+  /** If set, projects that already have an index are re-indexed when their files change, this often. Off by default. */
+  indexIntervalMs?: number;
 }
 
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
@@ -72,6 +80,8 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
   const scheduler = new Scheduler(store, supervisor, router, providers, registry);
   const resumer = checkpoints ? new ResumeService(store, supervisor, checkpoints, memory, scheduler) : undefined;
   const handoffs = checkpoints && resumer ? new HandoffService({ store, supervisor, checkpoints, resumer, providers, registry, workdir }) : undefined;
+  const flows = new WorkflowEngine({ store, supervisor, scheduler, worktrees, memory });
+  const repoIndex = new RepoIndex(store, memory);
   const routeInfo = (runId: string) => store.listRouting(runId).map((d) => ({ id: d.id, provider: d.provider, model: d.model, policyVersion: d.policyVersion, reason: d.reason, inputs: d.inputs, createdAt: d.createdAt }));
   // Memory writes name a role. Until agents get a tool bridge, the only caller is the local dashboard/user, so the
   // role is asserted by the caller; the service still enforces what each role may write.
@@ -313,6 +323,58 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       if (m === 'GET' && url.pathname === '/queue') return send(res, 200, store.listQueue());
       if (m === 'POST' && url.pathname === '/queue/drain') return send(res, 200, scheduler.drain());
       if (m === 'POST' && parts[0] === 'queue' && parts[2] === 'cancel') return send(res, 200, scheduler.cancelQueued(parts[1]));
+
+      // ---- Phase 11: Agent Factory snapshot (read-only, derived from real records)
+      if (m === 'GET' && url.pathname === '/factory') {
+        const projectId = url.searchParams.get('projectId') ?? undefined; if (projectId) need(store.getProject(projectId), 'project');
+        return send(res, 200, buildFactorySnapshot(store, flows, { projectId, activityLimit: Number(url.searchParams.get('activity') ?? 40) || 40 }));
+      }
+
+      // ---- Phase 10: repository index and knowledge graph
+      if (parts[0] === 'projects' && (parts[2] === 'index' || parts[2] === 'graph')) {
+        need(store.getProject(parts[1]), 'project');
+        if (parts[2] === 'index' && m === 'GET') return send(res, 200, repoIndex.status(parts[1]));
+        if (parts[2] === 'index' && m === 'POST') { const b = await readJson(req).catch(() => ({})); return send(res, 200, repoIndex.index(parts[1], { full: b.full === true })); }
+        if (parts[2] === 'graph' && parts[3] === 'search' && m === 'GET') return send(res, 200, repoIndex.search(parts[1], url.searchParams.get('q') ?? '', Number(url.searchParams.get('limit') ?? 40) || 40));
+        if (parts[2] === 'graph' && parts[3] === 'files' && m === 'GET') {
+          const path = url.searchParams.get('path') ?? ''; const depth = Math.min(Number(url.searchParams.get('depth') ?? 2) || 2, 6);
+          return send(res, 200, { dependencies: repoIndex.dependencies(parts[1], path, 1).results, dependents: repoIndex.dependents(parts[1], path, depth).results, tests: repoIndex.testsFor(parts[1], [path], depth).tests });
+        }
+        if (parts[2] === 'graph' && parts[3] === 'relevant' && m === 'GET') {
+          const files = (url.searchParams.get('files') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+          return send(res, 200, repoIndex.relevant(parts[1], { query: url.searchParams.get('query') ?? undefined, sessionId: url.searchParams.get('sessionId') ?? undefined, files, limit: Number(url.searchParams.get('limit') ?? 25) || 25 }));
+        }
+        if (parts[2] === 'graph' && parts[3] === 'inferred' && m === 'GET') return send(res, 200, repoIndex.inferredEdges(parts[1]));
+        if (parts[2] === 'graph' && parts[3] === 'inferred' && m === 'POST') {
+          const b = await readJson(req);
+          return send(res, 201, repoIndex.addInferred(parts[1], { fromId: str(b.fromId, 'fromId'), toId: str(b.toId, 'toId'), kind: str(b.kind, 'kind'), rationale: str(b.rationale, 'rationale'), model: typeof b.model === 'string' ? b.model : undefined }));
+        }
+      }
+      if (m === 'GET' && parts[0] === 'graph' && parts[1] === 'nodes' && parts.length === 3) return send(res, 200, repoIndex.node(parts[2]));
+      if (m === 'POST' && parts[0] === 'graph' && parts[1] === 'edges' && parts[3] === 'remove') return send(res, 200, repoIndex.removeInferred(parts[2]));
+      if (m === 'GET' && parts[0] === 'sessions' && parts[2] === 'graph') { need(store.getSession(parts[1]), 'session'); return send(res, 200, repoIndex.sessionGraph(parts[1])); }
+
+      // ---- Phase 9: multi-agent workflows
+      if (parts[0] === 'workflows') {
+        if (m === 'GET' && parts.length === 1) return send(res, 200, flows.list(url.searchParams.get('projectId') ?? undefined));
+        if (m === 'GET' && parts[1] === 'roles') return send(res, 200, ROLES);
+        if (m === 'POST' && parts.length === 1) {
+          const b = await readJson(req);
+          const definition = b.template && typeof b.template === 'object'
+            ? (() => { try { return featureTemplate(b.template); } catch (e: any) { throw new HttpError(400, e.message); } })() : b.definition;
+          return send(res, 201, flows.create({ projectId: str(b.projectId, 'projectId'), title: str(b.title, 'title'), goal: str(b.goal, 'goal'), definition }));
+        }
+        if (m === 'GET' && parts.length === 2) return send(res, 200, flows.get(parts[1]));
+        if (m === 'GET' && parts[2] === 'transitions') return send(res, 200, flows.transitions(parts[1]));
+        if (m === 'GET' && parts[2] === 'evidence') return send(res, 200, flows.evidenceList(parts[1], { step: url.searchParams.get('step') ?? undefined, full: url.searchParams.get('full') === '1' }));
+        if (m === 'GET' && parts[2] === 'record') return send(res, 200, flows.record(parts[1]));
+        if (m === 'POST' && parts[2] === 'start') return send(res, 200, flows.start(parts[1]));
+        if (m === 'POST' && parts[2] === 'cancel') return send(res, 200, await flows.cancel(parts[1]));
+        if (m === 'POST' && parts[2] === 'steps' && (parts[4] === 'approve' || parts[4] === 'reject')) {
+          const b = await readJson(req);
+          return send(res, 200, flows.decide(parts[1], parts[3], parts[4] === 'approve' ? 'approved' : 'rejected', str(b.approver, 'approver')));
+        }
+      }
       if (m === 'GET' && url.pathname === '/audit') return send(res, 200, store.listAudit(Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 500)));
       if (parts[0] === 'sessions' && parts[2] === 'handoffs' && m === 'GET') { need(store.getSession(parts[1]), 'session'); return send(res, 200, store.listHandoffs(parts[1])); }
       if (parts[0] === 'sessions' && parts[2] === 'handoff' && m === 'POST') {
@@ -324,7 +386,7 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       throw new HttpError(404, 'not found');
     } catch (e: any) {
       if (e instanceof HttpError || e instanceof MemoryError) return send(res, e.status, { error: e.message });
-      if (e instanceof WorktreeError || e instanceof RoutingError || e instanceof ProviderError || e instanceof HandoffError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof WorktreeError || e instanceof RoutingError || e instanceof ProviderError || e instanceof HandoffError || e instanceof WorkflowError || e instanceof IndexError) return send(res, e.status, { error: e.message, details: e.details });
       if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError || e instanceof WrongWorkdirError) return send(res, 409, { error: e.message });
       if (e instanceof ResumeError) return send(res, 409, { error: e.message, drift: e.drift });
       if (e instanceof InvalidTransitionError) return send(res, 409, { error: e.message });
@@ -332,6 +394,8 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });
+  if (opts.indexIntervalMs) { const t = setInterval(() => { try { repoIndex.refreshStale(); } catch (e) { console.error('re-index failed', e); } }, opts.indexIntervalMs); t.unref(); server.on('close', () => clearInterval(t)); }
+  if (opts.workflowIntervalMs) { flows.startTimer(opts.workflowIntervalMs); server.on('close', () => flows.stopTimer()); }
   if (opts.drainIntervalMs) {
     const t = setInterval(() => { try { scheduler.drain(); } catch (e) { console.error('queue drain failed', e); } }, opts.drainIntervalMs);
     t.unref(); server.on('close', () => clearInterval(t));

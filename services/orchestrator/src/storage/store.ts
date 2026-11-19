@@ -33,6 +33,12 @@ export class Store {
   private one<R>(sql: string, ...a: any[]): R | undefined { return this.db.prepare(sql).get(...a) as R | undefined; }
   private all<R>(sql: string, ...a: any[]): R[] { return this.db.prepare(sql).all(...a) as R[]; }
 
+  /** Narrow SQL access for modules that own their own tables (workflows, repository index). `tx` shares the Store transaction. */
+  sql() {
+    return { one: <R>(s: string, ...a: any[]) => this.one<R>(s, ...a), all: <R>(s: string, ...a: any[]) => this.all<R>(s, ...a),
+      run: (s: string, ...a: any[]) => this.db.prepare(s).run(...a), tx: <R>(fn: () => R) => this.tx(fn) };
+  }
+
   // ---- projects
   createProject(i: { name: string; repoPath: string; defaultBranch?: string; settings?: object; memoryRefs?: string[] }): T.Project {
     const id = newId('prj'), createdAt = now();
@@ -344,12 +350,12 @@ export class Store {
   // ---- knowledge graph (schema only in Phase 1; indexing arrives in Phase 10)
   addNode(i: Omit<T.KnowledgeNode, 'id'>): T.KnowledgeNode {
     const id = newId('kn');
-    this.db.prepare('INSERT INTO knowledge_node VALUES (?,?,?,?,?,?)').run(id, i.projectId, i.kind, i.name, i.provenance, i.verified ? 1 : 0);
+    this.db.prepare('INSERT INTO knowledge_node (id,project_id,kind,name,provenance,verified) VALUES (?,?,?,?,?,?)').run(id, i.projectId, i.kind, i.name, i.provenance, i.verified ? 1 : 0);
     return { id, ...i };
   }
   addEdge(i: Omit<T.KnowledgeEdge, 'id'>): T.KnowledgeEdge {
     const id = newId('ke');
-    this.db.prepare('INSERT INTO knowledge_edge VALUES (?,?,?,?,?,?)').run(id, i.fromId, i.toId, i.kind, i.provenance, i.verified ? 1 : 0);
+    this.db.prepare('INSERT INTO knowledge_edge (id,from_id,to_id,kind,provenance,verified) VALUES (?,?,?,?,?,?)').run(id, i.fromId, i.toId, i.kind, i.provenance, i.verified ? 1 : 0);
     return { id, ...i };
   }
   listEdges(nodeId: string): T.KnowledgeEdge[] {

@@ -84,3 +84,37 @@ export interface QueueItem { id: string; taskId: string; sessionId: string; stat
 export interface HandoffRec { id: string; fromProvider: string | null; toProvider: string; toModel: string; toRunId: string | null; status: 'started' | 'queued' | 'refused'; reason: string; notes: string[]; driftLevel: string | null; actor: string; createdAt: string }
 export interface AuditEntry { id: number; at: string; actor: string; action: string; subject: string; details: Record<string, unknown> }
 export interface SessionRouting { runId: string; status: string; model: string; provider: string; decisions: RoutingInfo[] }
+
+// ---- Phase 9: workflows
+export type StepStatus = 'pending' | 'running' | 'waiting_approval' | 'passed' | 'failed' | 'skipped' | 'cancelled';
+export interface WorkflowSummary { id: string; projectId: string; title: string; goal: string; status: 'draft' | 'running' | 'completed' | 'failed' | 'cancelled'; haltedReason: string | null; createdAt: string; updatedAt: string; steps: number; passed: number; running: number; waiting: number }
+export interface WorkflowStep {
+  id: string; kind: string; title?: string; role?: string; needs: string[]; prompt?: string; command?: string[]; verifies?: string; reviews?: string; fixer?: string; maxAttempts: number;
+  state: { status: StepStatus; attempts: number; sessionId: string | null; runId: string | null; approvalId: string | null; startedAt: string | null; endedAt: string | null; detail: Record<string, any> };
+  run: { status: string; model: string; provider: string; reason: string | null; costUsd: number | null } | null;
+}
+export interface WorkflowDetail { workflow: WorkflowSummary & { definition: { concurrency: number }; createdBy: string }; steps: WorkflowStep[]; approvals: { step: string; id: string; action: string; status: 'pending' | 'approved' | 'rejected'; approver: string | null; decidedAt: string | null }[] }
+export interface WorkflowTransition { id: number; stepKey: string | null; fromStatus: string | null; toStatus: string; reason: string; at: string }
+export interface WorkflowEvidence { id: number; stepKey: string; attempt: number; kind: string; summary: string; createdAt: string; content?: string }
+
+// ---- Phase 10: repository index and graph
+export interface IndexStatus { indexed: boolean; stale: boolean; reason: string; indexedRevision: string | null; headRevision: string | null; indexedAt: string | null; extractor: string | null; files: number; symbols: number; edges: number; changed: string[]; added: string[]; removed: string[] }
+export interface GraphNodeBrief { id: string; kind: string; name: string; path: string | null; line: number | null; symbolKind: string | null; verified: boolean; provenance: string }
+export interface GraphEvidence { edgeId: string; kind: string; provenance: string; verified: boolean; path: string | null; line: number | null; evidence: string }
+export interface GraphNodeDetail { node: GraphNodeBrief & { meta: Record<string, any>; sessionId: string | null }; out: (GraphEvidence & { other: GraphNodeBrief })[]; in: (GraphEvidence & { other: GraphNodeBrief })[]; source: { path: string; startLine: number; highlight: number; lines: string[]; changedSinceIndexed: boolean; missing?: boolean } | null }
+export interface RelevantFile { path: string; score: number; isTest: boolean; reasons: { why: string; evidence?: GraphEvidence }[] }
+export interface FileLinks { dependencies: (GraphNodeBrief & { depth: number; evidence: GraphEvidence })[]; dependents: (GraphNodeBrief & { depth: number; via: string; evidence: GraphEvidence })[]; tests: { test: GraphNodeBrief; covers: string[]; depth: number; evidence: GraphEvidence }[] }
+export interface SessionGraph { session: { id: string; title: string }; nodes: (GraphNodeBrief & { role: string })[]; edges: (GraphEvidence & { from: string; to: string })[]; touched: string[]; touchedNotInIndex: string[]; staleness: IndexStatus; note: string | null }
+
+// ---- Phase 11: Agent Factory
+export type FactoryState = 'queued' | 'running' | 'paused' | 'blocked' | 'waiting_approval' | 'failed' | 'completed' | 'cancelled' | 'skipped';
+export interface FactoryItem {
+  key: string; source: 'session' | 'workflow'; label: string; station: string; state: FactoryState; rawStatus: string; kind: string; role: string | null;
+  model: string | null; provider: string | null; attempt: number | null; sessionId: string | null; runId: string | null; workflowId: string | null; workflowTitle: string | null; stepKey: string | null;
+  startedAt: string | null; endedAt: string | null; updatedAt: string | null; lastOutput: string | null; note: string | null; demo: boolean;
+}
+export interface FactoryActivity { at: string; source: 'event' | 'workflow'; type: string; text: string; sessionId: string | null; workflowId: string | null; stepKey: string | null }
+export interface FactorySnapshot {
+  generatedAt: string; stations: { id: string; label: string; blurb: string; counts: Record<string, number>; total: number }[];
+  items: FactoryItem[]; activity: FactoryActivity[]; totals: { real: number; demo: number; active: number }; note: string;
+}

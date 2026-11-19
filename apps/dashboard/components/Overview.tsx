@@ -18,7 +18,6 @@ export default function Overview() {
       <div className="page-head">
         <div className="row spread">
           <h1>Overview</h1>
-          <Link href="/new" className="btn primary">+ New session</Link>
         </div>
         <p className="sub">
           Every number and status here comes from the orchestrator&apos;s database.

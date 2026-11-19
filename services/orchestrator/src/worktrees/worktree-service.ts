@@ -35,7 +35,8 @@ export class WorktreeService {
   private store: Store; private root?: string;
   constructor(store: Store, opts: { root?: string } = {}) { this.store = store; this.root = opts.root ?? process.env.ORCH_WORKTREE_ROOT; }
 
-  create(sessionId: string): Worktree {
+  /** `startPoint` (a branch of a previous workflow attempt) lets a correction continue from earlier work; the recorded base stays the project base. */
+  create(sessionId: string, startPoint?: string): Worktree {
     const session = this.store.getSession(sessionId); if (!session) throw new WorktreeError(404, 'session not found');
     const project = this.store.getProject(session.projectId)!;
     if (this.store.activeWorktreeForSession(sessionId)) throw new WorktreeError(409, 'session already has a worktree');
@@ -63,7 +64,7 @@ export class WorktreeService {
     if (existsSync(path)) throw new WorktreeError(409, `${path} already exists`);
     mkdirSync(root, { recursive: true });
 
-    const r = adminGit(repo, 'worktree', 'add', '-b', branch, path, baseRevision);
+    const r = adminGit(repo, 'worktree', 'add', '-b', branch, path, startPoint ?? baseRevision);
     if (r.code !== 0) throw new WorktreeError(409, `git could not create the worktree: ${(r.stderr || r.stdout).trim()}`);
     try { return this.store.createWorktree({ projectId: project.id, sessionId, path, branch, baseBranch, baseRevision }); }
     catch (e) { adminGit(repo, 'worktree', 'remove', path); throw e; } // brand new and clean, so a plain remove is safe
