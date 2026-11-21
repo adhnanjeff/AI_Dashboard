@@ -41,6 +41,8 @@ export interface RoutingDecision {
 export interface Approval {
   id: string; sessionId: string; action: string; evidence: Record<string, unknown>;
   status: ApprovalState; approver: string | null; decidedAt: string | null; createdAt: string;
+  /** Phase 12: what exactly was approved, by whom it was requested, when it lapses, and whether it was used. */
+  subject: string | null; requestedBy: string | null; expiresAt: string | null; consumedAt: string | null; consumedBy: string | null; decidedVia: string | null; risk: string | null;
 }
 export interface Worktree {
   id: string; projectId: string; sessionId: string; path: string; branch: string;

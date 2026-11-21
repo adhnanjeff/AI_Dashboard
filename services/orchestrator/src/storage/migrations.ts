@@ -259,4 +259,23 @@ CREATE TABLE index_state (
 );
 `,
   },
+  {
+    version: 9,
+    sql: `
+-- Phase 12: approvals become single-use, subject-bound decisions made through a human channel.
+ALTER TABLE approval ADD COLUMN subject TEXT;
+ALTER TABLE approval ADD COLUMN requested_by TEXT;
+ALTER TABLE approval ADD COLUMN expires_at TEXT;
+ALTER TABLE approval ADD COLUMN consumed_at TEXT;
+ALTER TABLE approval ADD COLUMN consumed_by TEXT;
+ALTER TABLE approval ADD COLUMN decided_via TEXT;
+ALTER TABLE approval ADD COLUMN risk TEXT;
+CREATE INDEX idx_approval_status ON approval(status, created_at);
+-- A request cannot be edited, re-decided or reused behind the application's back, and is never deleted.
+CREATE TRIGGER approval_request_fixed BEFORE UPDATE OF action, subject, requested_by, expires_at, evidence ON approval BEGIN SELECT RAISE(ABORT, 'an approval request cannot be edited after it is created'); END;
+CREATE TRIGGER approval_no_delete BEFORE DELETE ON approval BEGIN SELECT RAISE(ABORT, 'approvals are kept permanently'); END;
+CREATE TRIGGER approval_decision_once BEFORE UPDATE OF status ON approval WHEN OLD.status <> 'pending' BEGIN SELECT RAISE(ABORT, 'an approval is decided only once'); END;
+CREATE TRIGGER approval_consume_once BEFORE UPDATE OF consumed_at ON approval WHEN OLD.consumed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'an approval is used only once'); END;
+`,
+  },
 ];

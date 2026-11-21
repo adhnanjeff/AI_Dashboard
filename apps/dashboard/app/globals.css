@@ -231,3 +231,14 @@ details > summary { cursor: pointer; }
 }
 tr.sel { background: var(--accent-soft); }
 .fac-card .banner { margin-bottom: 0; }
+
+/* ------------------------------------------------------------------ Approvals */
+.count-pill { background: var(--red); color: #fff; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 0 6px; line-height: 17px; min-width: 18px; text-align: center; }
+.appr-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 1000px) { .appr-layout { grid-template-columns: 1fr; } }
+.appr-list { margin: 0; gap: 6px; }
+.appr-row { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
+.appr-row:hover { border-color: var(--accent); } .appr-row.on { border-color: var(--accent); background: var(--accent-soft); }
+.appr-row .nm { font-weight: 600; }
+.appr-detail h3 { margin-top: 18px; }
+.appr-decide { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }

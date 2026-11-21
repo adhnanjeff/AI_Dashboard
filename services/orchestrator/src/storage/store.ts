@@ -254,29 +254,46 @@ export class Store {
   }
 
   // ---- approvals
-  requestApproval(i: { sessionId: string; action: string; evidence?: Record<string, unknown> }): T.Approval {
+  requestApproval(i: { sessionId: string; action: string; evidence?: Record<string, unknown>; subject?: string; requestedBy?: string; ttlMs?: number; risk?: string }): T.Approval {
     return this.tx(() => {
-      const id = newId('apr');
-      this.db.prepare("INSERT INTO approval VALUES (?,?,?,?, 'pending', NULL, NULL, ?)")
-        .run(id, i.sessionId, i.action, j(redact(i.evidence ?? {})), now());
+      const id = newId('apr'), t = now();
+      const expires = i.ttlMs ? new Date(Date.now() + i.ttlMs).toISOString() : null;
+      this.db.prepare("INSERT INTO approval (id, session_id, action, evidence, status, created_at, subject, requested_by, expires_at, risk) VALUES (?,?,?,?, 'pending', ?,?,?,?,?)")
+        .run(id, i.sessionId, i.action, j(redact(i.evidence ?? {})), t, i.subject ?? null, i.requestedBy ?? null, expires, i.risk ? redactString(i.risk) : null);
       this.appendEvent({ sessionId: i.sessionId, type: 'approval.requested', payload: { approvalId: id, action: i.action } });
+      this.audit(i.requestedBy ?? 'system', 'approval.requested', id, { action: i.action, subject: i.subject ?? null, session: i.sessionId });
       return this.getApproval(id)!;
     });
   }
   getApproval(id: string): T.Approval | undefined {
     const r = this.one<any>('SELECT * FROM approval WHERE id=?', id);
-    return r && { id: r.id, sessionId: r.session_id, action: r.action, evidence: p(r.evidence), status: r.status,
-      approver: r.approver, decidedAt: r.decided_at, createdAt: r.created_at };
+    return r && this.apr(r);
   }
-  decideApproval(id: string, to: Exclude<ApprovalState, 'pending'>, approver: string): T.Approval {
+  private apr = (r: any): T.Approval => ({ id: r.id, sessionId: r.session_id, action: r.action, evidence: p(r.evidence), status: r.status,
+    approver: r.approver, decidedAt: r.decided_at, createdAt: r.created_at, subject: r.subject ?? null, requestedBy: r.requested_by ?? null,
+    expiresAt: r.expires_at ?? null, consumedAt: r.consumed_at ?? null, consumedBy: r.consumed_by ?? null, decidedVia: r.decided_via ?? null, risk: r.risk ?? null });
+  listApprovals(o: { status?: T.Approval['status']; limit?: number } = {}): T.Approval[] {
+    return this.all<any>(`SELECT * FROM approval ${o.status ? 'WHERE status=?' : ''} ORDER BY created_at DESC, rowid DESC LIMIT ?`, ...(o.status ? [o.status] : []), o.limit ?? 200).map(this.apr);
+  }
+  decideApproval(id: string, to: Exclude<ApprovalState, 'pending'>, approver: string, via = 'direct'): T.Approval {
     return this.tx(() => {
       const a = this.getApproval(id); if (!a) throw new Error(`approval not found: ${id}`);
       if (!approver.trim()) throw new Error('approver identity is required');
       assertApprovalTransition(a.status, to);
-      this.db.prepare('UPDATE approval SET status=?, approver=?, decided_at=? WHERE id=?').run(to, approver, now(), id);
-      this.appendEvent({ sessionId: a.sessionId, type: 'approval.decided', payload: { approvalId: id, status: to, approver } });
+      this.db.prepare('UPDATE approval SET status=?, approver=?, decided_at=?, decided_via=? WHERE id=?').run(to, approver, now(), via, id);
+      this.appendEvent({ sessionId: a.sessionId, type: 'approval.decided', payload: { approvalId: id, status: to, approver, via } });
+      this.audit(approver, `approval.${to}`, id, { action: a.action, subject: a.subject, via });
       return this.getApproval(id)!;
     });
+  }
+  /**
+   * Uses an approval up. The one UPDATE checks everything at once, so two callers cannot both succeed:
+   * it must be approved, not yet used, not expired, and be for exactly this action on exactly this subject.
+   */
+  consumeApproval(id: string, i: { action: string; subject: string; by: string }): boolean {
+    const r = this.db.prepare("UPDATE approval SET consumed_at=?, consumed_by=? WHERE id=? AND status='approved' AND consumed_at IS NULL AND action=? AND subject=? AND (expires_at IS NULL OR expires_at > ?)")
+      .run(now(), i.by, id, i.action, i.subject, now());
+    return Number(r.changes) === 1;
   }
 
   // ---- git worktrees (one active per session)

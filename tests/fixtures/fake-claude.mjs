@@ -13,7 +13,7 @@ const noise = () => {
 };
 const say = (text, tool) => out({ type: 'assistant', message: { content: [
   { type: 'text', text }, ...(tool ? [{ type: 'tool_use', id: 't1', name: tool, input: {} }] : [])] } });
-const toolResult = () => out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'File created', is_error: false }] } });
+const toolResult = () => out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: process.env.FAKE_TOOL_TEXT ?? 'File created', is_error: false }] } });
 const success = (text = 'DONE') => out({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 0.01 });
 
 if (scenario === 'directed') {
@@ -52,7 +52,7 @@ if (scenario === 'edit-then-hang') {
 } else if (scenario === 'record-prompt') {
   // Records exactly what it was launched with, then finishes successfully.
   init();
-  if (process.env.FAKE_ARGS_FILE) writeFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), configDir: process.env.CLAUDE_CONFIG_DIR ?? null, keyLength: (process.env.ANTHROPIC_API_KEY ?? '').length }));
+  if (process.env.FAKE_ARGS_FILE) writeFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), configDir: process.env.CLAUDE_CONFIG_DIR ?? null, keyLength: (process.env.ANTHROPIC_API_KEY ?? '').length, orchEnv: Object.keys(process.env).filter((k) => /^ORCH_|^GITHUB_TOKEN$|^GH_TOKEN$/.test(k)) }));
   writeFileSync('part2.txt', 'finished by resumed worker\n'); say('continuing', 'Write'); toolResult(); success(); process.exit(0);
 } else if (scenario === 'slow') {
   init();
