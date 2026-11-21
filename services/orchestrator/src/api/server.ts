@@ -4,7 +4,7 @@ import { resolve, sep } from 'node:path';
 import type { Store } from '../storage/store.ts';
 import type { DomainEvent } from '../domain/types.ts';
 import { snapshot } from '../checkpoints/git.ts';
-import { IdempotencyConflictError, SessionBusyError, WorktreeBusyError, WrongWorkdirError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
+import { CapacityError, IdempotencyConflictError, SessionBusyError, WorktreeBusyError, WrongWorkdirError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
 import { InvalidTransitionError } from '../domain/states.ts';
 import { ResumeError, ResumeService } from '../checkpoints/resume-service.ts';
 import { MemoryError, MemoryService } from '../memory/memory-service.ts';
@@ -17,6 +17,9 @@ import { HandoffError, HandoffService } from '../providers/handoff-service.ts';
 import { WorkflowEngine, WorkflowError } from '../workflows/engine.ts';
 import { IndexError, RepoIndex } from '../indexing/indexer.ts';
 import { buildFactorySnapshot } from '../factory/snapshot.ts';
+import { PolicyError, PolicyService, PROTECTED_ACTIONS, type PolicyOptions } from '../policy/policy-service.ts';
+import { ProtectedOps, type CiProvider } from '../policy/protected-ops.ts';
+import { PROFILES, ROLE_PROFILE } from '../policy/profiles.ts';
 import { ROLES, featureTemplate } from '../workflows/definition.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
@@ -60,6 +63,13 @@ export interface ApiOptions {
   workflowIntervalMs?: number;
   /** If set, projects that already have an index are re-indexed when their files change, this often. Off by default. */
   indexIntervalMs?: number;
+  /** Phase 12. Pass the same PolicyService the Supervisor uses. If omitted one is created from the options below. */
+  policy?: PolicyService;
+  /** Secret a person's decision must carry (header x-orch-decision-token). The dashboard server adds it; agents never see it. */
+  decisionToken?: string;
+  protectedBranches?: string[]; separationOfDuties?: boolean;
+  /** Where CI / branch-protection status comes from. Default: none configured. */
+  ci?: CiProvider;
 }
 
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
@@ -82,6 +92,14 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
   const handoffs = checkpoints && resumer ? new HandoffService({ store, supervisor, checkpoints, resumer, providers, registry, workdir }) : undefined;
   const flows = new WorkflowEngine({ store, supervisor, scheduler, worktrees, memory });
   const repoIndex = new RepoIndex(store, memory);
+  const policy = opts.policy ?? new PolicyService(store, { decisionToken: opts.decisionToken, protectedBranches: opts.protectedBranches, separationOfDuties: opts.separationOfDuties } satisfies PolicyOptions);
+  const ops = new ProtectedOps({ store, policy, worktrees, ci: opts.ci });
+  const approvalView = (a: NonNullable<ReturnType<Store['getApproval']>>) => {
+    const t = new Date().toISOString(); const lapsed = !!a.expiresAt && a.expiresAt <= t;
+    const state = a.status === 'pending' ? (lapsed ? 'expired' : 'pending') : a.consumedAt ? 'used' : a.status === 'approved' && lapsed ? 'expired' : a.status;
+    const s = store.getSession(a.sessionId); const label = (PROTECTED_ACTIONS as Record<string, { label: string }>)[a.action]?.label ?? null;
+    return { ...a, state, actionLabel: label, sessionTitle: s?.title ?? null, projectId: s?.projectId ?? null };
+  };
   const routeInfo = (runId: string) => store.listRouting(runId).map((d) => ({ id: d.id, provider: d.provider, model: d.model, policyVersion: d.policyVersion, reason: d.reason, inputs: d.inputs, createdAt: d.createdAt }));
   // Memory writes name a role. Until agents get a tool bridge, the only caller is the local dashboard/user, so the
   // role is asserted by the caller; the service still enforces what each role may write.
@@ -203,7 +221,8 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         const timeoutMs = b.timeoutMs === undefined ? undefined : Number(b.timeoutMs);
         if (timeoutMs !== undefined && !(timeoutMs >= 1000 && timeoutMs <= 3_600_000)) throw new HttpError(400, 'timeoutMs must be 1000..3600000');
         const r = scheduler.launch({ taskId: task.id, prompt, cwd: workdir(task.sessionId), model, timeoutMs, idempotencyKey: idemKey(req), origin: 'run',
-          provider: b.provider === undefined ? undefined : str(b.provider, 'provider'), accountId: b.accountId === undefined ? undefined : str(b.accountId, 'accountId') });
+          provider: b.provider === undefined ? undefined : str(b.provider, 'provider'), accountId: b.accountId === undefined ? undefined : str(b.accountId, 'accountId'),
+          profile: b.permissionProfile === undefined ? undefined : str(b.permissionProfile, 'permissionProfile'), approvalId: b.approvalId === undefined ? undefined : str(b.approvalId, 'approvalId') });
         if (r.kind === 'queued') return send(res, 202, { queued: true, item: r.item, reason: r.reason });
         return send(res, 202, { ...r.run, routing: r.decision && { mode: r.decision.mode, model: r.decision.model, tier: r.decision.tier, reason: r.decision.reason, policyVersion: r.decision.policyVersion } });
       }
@@ -324,6 +343,33 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       if (m === 'POST' && url.pathname === '/queue/drain') return send(res, 200, scheduler.drain());
       if (m === 'POST' && parts[0] === 'queue' && parts[2] === 'cancel') return send(res, 200, scheduler.cancelQueued(parts[1]));
 
+      // ---- Phase 12: permissions, approvals, protected actions
+      const token = typeof req.headers['x-orch-decision-token'] === 'string' ? req.headers['x-orch-decision-token'] : undefined;
+      if (m === 'GET' && url.pathname === '/policy') return send(res, 200, { profiles: Object.values(PROFILES), roleDefaults: ROLE_PROFILE,
+        protectedActions: PROTECTED_ACTIONS, decisionTokenRequired: !!policy.opts.decisionToken, separationOfDuties: policy.opts.separationOfDuties, approvalTtlMs: policy.opts.approvalTtlMs, ciConfigured: !!opts.ci });
+      if (m === 'GET' && url.pathname === '/approvals') {
+        const st = url.searchParams.get('status'); const all = store.listApprovals({ limit: Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 300) }).map(approvalView);
+        return send(res, 200, st ? all.filter((a) => a.state === st) : all);
+      }
+      if (parts[0] === 'approvals' && parts.length >= 2) {
+        const a = need(store.getApproval(parts[1]), 'approval');
+        if (m === 'GET' && parts.length === 2) return send(res, 200, approvalView(a));
+        if (m === 'POST' && (parts[2] === 'approve' || parts[2] === 'reject')) { const b = await readJson(req); return send(res, 200, approvalView(policy.decide(a.id, parts[2] === 'approve' ? 'approved' : 'rejected', b.approver, token))); }
+        if (m === 'POST' && parts[2] === 'execute-merge') { const b = await readJson(req); return send(res, 200, ops.executeMerge(a.id, str(b.actor, 'actor'))); }
+      }
+      if (m === 'POST' && parts[0] === 'projects' && parts[2] === 'merge-requests') {
+        const b = await readJson(req); need(store.getProject(parts[1]), 'project');
+        return send(res, 201, approvalView(ops.requestMerge({ projectId: parts[1], branch: str(b.branch, 'branch'), target: b.target === undefined ? undefined : str(b.target, 'target'), requestedBy: str(b.requestedBy, 'requestedBy'), workflowId: b.workflowId === undefined ? undefined : str(b.workflowId, 'workflowId') })));
+      }
+      if (m === 'POST' && parts[0] === 'sessions' && parts[2] === 'worktree' && parts[3] === 'discard-request') { need(store.getSession(parts[1]), 'session'); const b = await readJson(req); return send(res, 201, approvalView(ops.requestDiscard(parts[1], str(b.requestedBy, 'requestedBy')))); }
+      if (m === 'POST' && parts[0] === 'sessions' && parts[2] === 'worktree' && parts[3] === 'discard') { need(store.getSession(parts[1]), 'session'); const b = await readJson(req); return send(res, 200, ops.executeDiscard(parts[1], b.approvalId, str(b.actor, 'actor'))); }
+      if (m === 'POST' && parts[0] === 'tasks' && parts[2] === 'permission-requests') {
+        const t = need(store.getTask(parts[1]), 'task'); const b = await readJson(req); const profile = str(b.profile, 'profile');
+        if (!(profile in PROFILES) || !PROFILES[profile as keyof typeof PROFILES].elevated) throw new HttpError(400, 'only the elevated profiles (terminal, network, external) need a request');
+        return send(res, 201, approvalView(policy.request('permission.elevate', { sessionId: t.sessionId, subject: `profile:${profile}@task:${t.id}`, requestedBy: str(b.requestedBy, 'requestedBy'),
+          evidence: { kind: 'permission', taskId: t.id, profile, grants: PROFILES[profile as keyof typeof PROFILES].grants, why: typeof b.why === 'string' ? b.why.slice(0, 500) : null } })));
+      }
+
       // ---- Phase 11: Agent Factory snapshot (read-only, derived from real records)
       if (m === 'GET' && url.pathname === '/factory') {
         const projectId = url.searchParams.get('projectId') ?? undefined; if (projectId) need(store.getProject(projectId), 'project');
@@ -372,7 +418,7 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
         if (m === 'POST' && parts[2] === 'cancel') return send(res, 200, await flows.cancel(parts[1]));
         if (m === 'POST' && parts[2] === 'steps' && (parts[4] === 'approve' || parts[4] === 'reject')) {
           const b = await readJson(req);
-          return send(res, 200, flows.decide(parts[1], parts[3], parts[4] === 'approve' ? 'approved' : 'rejected', str(b.approver, 'approver')));
+          return send(res, 200, flows.decide(parts[1], parts[3], parts[4] === 'approve' ? 'approved' : 'rejected', policy.authorizeDecision(b.approver, token)));
         }
       }
       if (m === 'GET' && url.pathname === '/audit') return send(res, 200, store.listAudit(Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 500)));
@@ -387,6 +433,8 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
     } catch (e: any) {
       if (e instanceof HttpError || e instanceof MemoryError) return send(res, e.status, { error: e.message });
       if (e instanceof WorktreeError || e instanceof RoutingError || e instanceof ProviderError || e instanceof HandoffError || e instanceof WorkflowError || e instanceof IndexError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof PolicyError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof CapacityError) return send(res, 429, { error: e.message });
       if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError || e instanceof WrongWorkdirError) return send(res, 409, { error: e.message });
       if (e instanceof ResumeError) return send(res, 409, { error: e.message, drift: e.drift });
       if (e instanceof InvalidTransitionError) return send(res, 409, { error: e.message });

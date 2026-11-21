@@ -118,3 +118,17 @@ export interface FactorySnapshot {
   generatedAt: string; stations: { id: string; label: string; blurb: string; counts: Record<string, number>; total: number }[];
   items: FactoryItem[]; activity: FactoryActivity[]; totals: { real: number; demo: number; active: number }; note: string;
 }
+
+// ---- Phase 12: approvals, permissions, protected actions
+export type ApprovalViewState = 'pending' | 'approved' | 'rejected' | 'used' | 'expired';
+export interface ApprovalRisk { level: 'high' | 'medium' | 'info'; text: string }
+export interface ApprovalView {
+  id: string; sessionId: string; action: string; actionLabel: string | null; sessionTitle: string | null; projectId: string | null;
+  evidence: Record<string, any>; status: 'pending' | 'approved' | 'rejected'; state: ApprovalViewState; approver: string | null; decidedAt: string | null; createdAt: string;
+  subject: string | null; requestedBy: string | null; expiresAt: string | null; consumedAt: string | null; consumedBy: string | null; decidedVia: string | null; risk: string | null;
+}
+export interface PolicyInfo {
+  profiles: { id: string; label: string; description: string; grants: string[]; elevated: boolean; allowedTools: string[]; disallowedTools: string[] }[];
+  roleDefaults: Record<string, string>; protectedActions: Record<string, { label: string; risk: string }>;
+  decisionTokenRequired: boolean; separationOfDuties: boolean; approvalTtlMs: number; ciConfigured: boolean;
+}

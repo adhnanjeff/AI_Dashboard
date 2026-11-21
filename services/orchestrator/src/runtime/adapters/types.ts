@@ -11,6 +11,8 @@ export interface LaunchSpec {
   resumeId?: string;
   /** Extra environment for this launch only (an account's config directory or credential). Never logged or stored. */
   env?: Record<string, string>;
+  /** Phase 12: the tools this process may use, decided by the policy service from its role. Absent = the adapter's own default. */
+  tools?: { allowed: string[]; disallowed: string[] };
 }
 
 export type NormalizedEvent =

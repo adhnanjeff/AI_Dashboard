@@ -2,7 +2,7 @@ import type { AgentRun, QueueItem } from '../domain/types.ts';
 import type { Store } from '../storage/store.ts';
 import { ProviderError, type ProviderService } from '../providers/accounts.ts';
 import type { ProviderRegistry } from '../providers/registry.ts';
-import { SessionBusyError, WorktreeBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
+import { CapacityError, SessionBusyError, WorktreeBusyError, type Supervisor } from '../runtime/process-manager/supervisor.ts';
 import { RoutingError, type Decision, type Router } from './router.ts';
 
 export class BudgetError extends RoutingError {}
@@ -16,6 +16,8 @@ export interface LaunchRequest {
   /** Pin a provider and/or one of its registered accounts (used by handoff). Absent = any that can take the model. */
   provider?: string; accountId?: string;
   role?: string; timeoutMs?: number; resumeId?: string; idempotencyKey?: string; origin: LaunchOrigin;
+  /** Permission profile and the approval that allows it when it is above the role's default. See PolicyService. */
+  profile?: string; approvalId?: string;
 }
 export type LaunchResult =
   | { kind: 'started'; run: AgentRun; decision: Decision | null; replayed?: boolean }
@@ -62,13 +64,13 @@ export class Scheduler {
       if (!allowQueue) throw new ProviderUnavailableError(409, `no authorised capacity: ${why}`, { retryAfter: until ?? null });
       const item = this.store.enqueue({ taskId: req.taskId, sessionId: task.sessionId, reason: `no authorised capacity: ${why}`,
         request: { taskId: req.taskId, prompt: req.prompt, cwd: req.cwd, model: req.model, provider: req.provider, accountId: req.accountId, role: req.role,
-          timeoutMs: req.timeoutMs, resumeId: req.resumeId, idempotencyKey: req.idempotencyKey, origin: req.origin } });
+          timeoutMs: req.timeoutMs, resumeId: req.resumeId, idempotencyKey: req.idempotencyKey, origin: req.origin, profile: req.profile, approvalId: req.approvalId } });
       return { kind: 'queued', item, reason: item.reason };
     }
 
     const env = this.providers.launchEnv(ready.accountId, ready.provider);
     const run = this.supervisor.start({ taskId: req.taskId, prompt: req.prompt, cwd: req.cwd, model: decision.model, role: req.role,
-      timeoutMs: req.timeoutMs, resumeId: req.resumeId, idempotencyKey: req.idempotencyKey, provider: ready.provider, accountId: ready.accountId ?? undefined, env });
+      timeoutMs: req.timeoutMs, resumeId: req.resumeId, idempotencyKey: req.idempotencyKey, profile: req.profile, approvalId: req.approvalId, provider: ready.provider, accountId: ready.accountId ?? undefined, env });
     if (ready.accountId) this.store.touchAccount(ready.accountId);
     this.store.recordRouting({ runId: run.id, provider: ready.provider, model: decision.model, policyVersion: String(decision.policyVersion), reason: decision.reason,
       usage: { source: 'unavailable' }, inputs: { ...this.router.inputsOf(decision), origin: req.origin, accountId: ready.accountId } });
@@ -86,7 +88,7 @@ export class Scheduler {
         const r = this.launch({ ...req, origin: 'queue' }, { allowQueue: false });
         if (r.kind === 'started') { this.store.updateQueueItem(item.id, { status: 'started', runId: r.run.id, bumpAttempts: true }); started.push(item.id); }
       } catch (e: any) {
-        if (e instanceof ProviderUnavailableError || e instanceof SessionBusyError || e instanceof WorktreeBusyError) {
+        if (e instanceof ProviderUnavailableError || e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof CapacityError) {
           const q = this.store.updateQueueItem(item.id, { bumpAttempts: true });
           if (q.attempts >= MAX_QUEUE_ATTEMPTS) { this.store.updateQueueItem(item.id, { status: 'abandoned', reason: 'gave up waiting for capacity' }); abandoned.push(item.id); }
           continue;

@@ -1,4 +1,5 @@
 import type { MemoryEntry } from '../domain/types.ts';
+import { wrapUntrusted } from '../policy/untrusted.ts';
 import { KNOWN_ROLES, canWrite, categoriesFor, hashContent, isSourceKind, jaccard, screenMemory, tokens } from '../domain/memory.ts';
 import type { Store } from '../storage/store.ts';
 import type { CheckpointService } from '../checkpoints/checkpoint-service.ts';
@@ -187,7 +188,7 @@ export class MemoryService {
       if (rows.length) L.push('', `## ${title} (recorded${rows.some((r) => r.trust === 'agent') ? ', some by agents: unverified' : ' by the user'})`, ...rows.map((r) => `- ${oneLine(r.content)} [${r.trust}, ${r.source.kind}${r.source.ref ? `:${r.source.ref}` : ''}]`));
     }
     const said = cp?.data.lastAgentMessage;
-    if (said) L.push('', '## Unverified: last thing the previous worker said', `> ${oneLine(said)}`);
+    if (said) L.push('', '## Unverified: last thing the previous worker said', wrapUntrusted('previous worker message', oneLine(said), { maxChars: 1200 }));
     L.push('', '## Before editing', 'Inspect the current diff and confirm this summary against the repository. Do not discard uncommitted changes.');
     return { generatedAt, markdown: L.join('\n'), facts: { sessionId, status: s.status, checkpointSeq: cp?.seq ?? null, drift: drift?.level ?? null,
       changedFiles: live.changedFiles, runs: runs.map((r) => ({ id: r.id, status: r.status })), memoryEntries: mem.length } };

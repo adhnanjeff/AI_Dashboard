@@ -1,4 +1,5 @@
 import { spawn, execFile } from 'node:child_process';
+import { agentEnv } from '../../policy/profiles.ts';
 import type { AdapterExit, AdapterProcess, LaunchSpec, NormalizedEvent, ProviderAdapter, ProviderCapabilities } from './types.ts';
 
 export interface ClaudeCliOptions {
@@ -87,11 +88,12 @@ export class ClaudeCliAdapter implements ProviderAdapter {
     // (a shell splits it on spaces; Phase 0 hit exactly that bug).
     const args = [...(o.baseArgs ?? []), '-p', spec.prompt, '--output-format', 'stream-json', '--verbose',
       '--model', spec.model, '--permission-mode', o.permissionMode ?? 'acceptEdits',
-      '--allowedTools', o.allowedTools ?? 'Read,Edit,Write'];
+      '--allowedTools', spec.tools ? spec.tools.allowed.join(',') : o.allowedTools ?? 'Read,Edit,Write'];
+    if (spec.tools?.disallowed.length) args.push('--disallowedTools', spec.tools.disallowed.join(','));
     if (spec.resumeId) args.push('--resume', spec.resumeId); else args.push('--session-id', spec.cliSessionId);
 
     const child = spawn(o.command ?? 'claude', args, {
-      cwd: spec.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...o.env, ...spec.env },
+      cwd: spec.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...agentEnv(process.env), ...o.env, ...spec.env },
       detached: process.platform !== 'win32', // own process group on POSIX so killTree can signal -pid
     });
 

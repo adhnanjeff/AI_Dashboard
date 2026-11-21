@@ -10,6 +10,8 @@ import { ProviderHealthService } from './providers/health.ts';
 import { Supervisor } from './runtime/process-manager/supervisor.ts';
 import { CheckpointService } from './checkpoints/checkpoint-service.ts';
 import { createApi } from './api/server.ts';
+import { PolicyService } from './policy/policy-service.ts';
+import { loadDecisionToken } from './policy/decision-token.ts';
 
 const dbPath = resolve(process.env.DB_PATH ?? '.sandbox/orchestrator.db');
 const port = Number(process.env.PORT ?? 4317);
@@ -24,7 +26,10 @@ const registry = new ProviderRegistry([new ClaudeCliAdapter({ command: process.e
 for (const x of process.env.ORCH_EXTRA_ADAPTERS ? JSON.parse(process.env.ORCH_EXTRA_ADAPTERS) : [])
   registry.register(new ClaudeCliAdapter({ providerName: String(x.name), command: x.command, baseArgs: x.baseArgs, capabilities: { ...CLAUDE_CLI_CAPABILITIES, displayName: String(x.name) } }));
 const health = new ProviderHealthService(store, { rateLimitCooldownMs: process.env.ORCH_RATE_LIMIT_COOLDOWN_MS ? Number(process.env.ORCH_RATE_LIMIT_COOLDOWN_MS) : undefined });
+// Decisions on approvals need a secret that only the dashboard server holds. It is never passed to agent processes (see policy/profiles.ts agentEnv).
+const policy = new PolicyService(store, { decisionToken: loadDecisionToken(resolve(process.env.ORCH_DECISION_TOKEN_FILE ?? '.sandbox/decision.token')), protectedBranches: process.env.ORCH_PROTECTED_BRANCHES?.split(',').map((s) => s.trim()).filter(Boolean), separationOfDuties: process.env.ORCH_SEPARATION_OF_DUTIES === '1' });
 const supervisor = new Supervisor(store, registry, {
+  policy, maxActiveRuns: process.env.ORCH_MAX_ACTIVE_RUNS ? Number(process.env.ORCH_MAX_ACTIVE_RUNS) : undefined,
   health,
   checkpoints: new CheckpointService(store),
   checkpointIntervalMs: process.env.ORCH_CHECKPOINT_INTERVAL_MS ? Number(process.env.ORCH_CHECKPOINT_INTERVAL_MS) : undefined,
@@ -32,7 +37,7 @@ const supervisor = new Supervisor(store, registry, {
 
 // ORCH_ALLOWED_ORIGINS: comma-separated browser origins allowed to call the API directly (default none;
 // the dashboard's server talks to us without an Origin header).
-const server = createApi(store, supervisor, { worktreeRoot: process.env.ORCH_WORKTREE_ROOT, drainIntervalMs: 30_000, workflowIntervalMs: 1_000, indexIntervalMs: 20_000, allowedOrigins: process.env.ORCH_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) });
+const server = createApi(store, supervisor, { policy, worktreeRoot: process.env.ORCH_WORKTREE_ROOT, drainIntervalMs: 30_000, workflowIntervalMs: 1_000, indexIntervalMs: 20_000, allowedOrigins: process.env.ORCH_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) });
 // Binding the port doubles as the single-instance lock. Orphan recovery runs only AFTER it succeeds:
 // a second instance must never mark the first instance's live runs as orphaned.
 server.on('error', (e: NodeJS.ErrnoException) => {

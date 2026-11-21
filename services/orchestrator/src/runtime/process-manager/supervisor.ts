@@ -7,6 +7,9 @@ import type { Store } from '../../storage/store.ts';
 import type { AdapterProcess, NormalizedEvent, ProviderAdapter } from '../adapters/types.ts';
 import type { ProviderHealthService } from '../../providers/health.ts';
 import { ProviderRegistry } from '../../providers/registry.ts';
+import type { PolicyService } from '../../policy/policy-service.ts';
+import { scanUntrusted } from '../../policy/untrusted.ts';
+import { redactString } from '../../domain/redact.ts';
 
 export interface StartInput {
   taskId: string; prompt: string; cwd: string; model: string;
@@ -19,8 +22,17 @@ export interface StartInput {
   accountId?: string;
   /** Extra environment for this launch only (account profile / credential). Never stored. */
   env?: Record<string, string>;
+  /** Permission profile for this run. Default: the one for its role. Anything above that needs `approvalId` (see PolicyService). */
+  profile?: string; approvalId?: string;
 }
+export class CapacityError extends Error {}
 export interface SupervisorOptions {
+  /** Enforces permission profiles. Without it a run gets the adapter's own default tools (tests only). */
+  policy?: PolicyService;
+  /** Most runs active at once, across all sessions. Default 8. */
+  maxActiveRuns?: number;
+  /** Longest a single run may be given, whatever the caller asks for. Default 60 minutes. */
+  maxTimeoutMs?: number;
   /** Records what each provider reports about itself (rate limits, errors) so work is not sent to a limited account. */
   health?: ProviderHealthService;
   defaultTimeoutMs?: number; logCapBytes?: number;
@@ -51,6 +63,7 @@ export class Supervisor {
   readonly checkpoints?: CheckpointService;
   private store: Store; readonly registry: ProviderRegistry; readonly health?: ProviderHealthService;
   private defaultTimeoutMs: number; private logCap: number; private cpInterval: number;
+  private policy?: PolicyService; private maxActive: number; private maxTimeout: number;
   private active = new Map<string, Active>();
 
   constructor(store: Store, adapter: ProviderAdapter | ProviderRegistry, opts: SupervisorOptions = {}) {
@@ -58,6 +71,7 @@ export class Supervisor {
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 10 * 60_000;
     this.logCap = opts.logCapBytes ?? 5 * 1024 * 1024;
     this.checkpoints = opts.checkpoints; this.cpInterval = opts.checkpointIntervalMs ?? 5000;
+    this.policy = opts.policy; this.maxActive = opts.maxActiveRuns ?? 8; this.maxTimeout = opts.maxTimeoutMs ?? 60 * 60_000;
   }
 
   /** Starts a run and returns once it is `running`. Use waitFor() to await the final state. */
@@ -77,6 +91,10 @@ export class Supervisor {
     }
     for (const a of this.active.values())
       if (a.sessionId === session.id) throw new SessionBusyError(`session ${session.id} already has an active run (${a.runId})`);
+
+    if (this.active.size >= this.maxActive) throw new CapacityError(`already running ${this.active.size} agents (the limit is ${this.maxActive}); wait for one to finish`);
+    // Decided before any state changes, so a refused permission leaves nothing half-started.
+    const profile = this.policy?.authorizeProfile({ role: input.role, requested: input.profile, taskId: task.id, approvalId: input.approvalId });
 
     // A session with an isolated worktree may only ever run there: it must not write into the main checkout
     // or into another session's worktree, whatever the caller passes.
@@ -101,9 +119,11 @@ export class Supervisor {
 
     // Persist state BEFORE launching work, so a crash right after launch is still recoverable.
     this.checkpoint(session.id, run.id, input.cwd, 'before-launch', `Start the task: ${task.description}`);
+    if (profile && this.policy) this.store.appendEvent({ sessionId: session.id, runId: run.id, type: 'policy.profile', payload: { profile, role: run.role, grants: this.policy.profile(profile).grants, elevated: this.policy.profile(profile).elevated } });
 
     let proc: AdapterProcess;
-    try { proc = adapter.launch({ cwd: input.cwd, prompt: input.prompt, model: input.model, cliSessionId, resumeId: input.resumeId, env: input.env }); }
+    try { proc = adapter.launch({ cwd: input.cwd, prompt: redactString(input.prompt), model: input.model, cliSessionId, resumeId: input.resumeId, env: input.env,
+      tools: profile && this.policy ? { allowed: this.policy.profile(profile).allowedTools, disallowed: this.policy.profile(profile).disallowedTools } : undefined }); }
     catch (e: any) {
       this.health?.recordError(adapter.provider, accountKey, `launch error: ${e.message}`);
       this.store.transitionRun(run.id, 'running', { cliSessionId });
@@ -128,6 +148,9 @@ export class Supervisor {
       else if (ev.kind === 'assistant') this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.message', payload: { text: ev.text.slice(0, 2000), tools: ev.tools } });
       else if (ev.kind === 'tool_result') {
         this.store.appendEvent({ sessionId, runId: run.id, type: 'agent.tool_result', payload: { isError: ev.isError, summary: ev.summary } });
+        // Tool output is data. If it is trying to give orders, record that; the orders are never obeyed by the orchestrator.
+        const sus = typeof ev.summary === 'string' ? scanUntrusted(ev.summary) : undefined;
+        if (sus?.suspicious) this.store.appendEvent({ sessionId, runId: run.id, type: 'security.untrusted_instruction', payload: { reasons: sus.reasons, source: 'tool output' } });
         // Mid-run checkpoint after a successful tool call (throttled), so a crash loses little work.
         if (!ev.isError && Date.now() - lastCp >= this.cpInterval) {
           lastCp = Date.now();
@@ -143,7 +166,7 @@ export class Supervisor {
     });
     proc.onStderr((c) => addLog(`[stderr] ${c}`));
 
-    const timeoutMs = input.timeoutMs ?? this.defaultTimeoutMs;
+    const timeoutMs = Math.min(input.timeoutMs ?? this.defaultTimeoutMs, this.maxTimeout);
     entry.timer = setTimeout(() => { entry.timedOut = true; void proc.kill(); }, timeoutMs);
 
     entry.finished = proc.done.then((exit) => {

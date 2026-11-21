@@ -6,7 +6,20 @@
 //   * Host must be a loopback name            -> blocks DNS-rebinding
 //   * POST must come from this site (Origin)  -> blocks cross-site form / fetch posts
 //   * bodies must be JSON
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 export const dynamic = 'force-dynamic';
+
+// Decisions on approvals (approve / reject) need the decision token. Only this server holds it, and it is added only
+// to those routes, only for a same-site browser request. The orchestrator never hands it to agent processes.
+const DECISION_PATH = /^\/?(approvals\/[^/]+\/(approve|reject)|workflows\/[^/]+\/steps\/[^/]+\/(approve|reject))$/;
+function decisionToken(): string | undefined {
+  const env = process.env.ORCH_DECISION_TOKEN?.trim(); if (env) return env;
+  for (const p of [process.env.ORCH_DECISION_TOKEN_FILE, resolve(process.cwd(), '.sandbox/decision.token'), resolve(process.cwd(), '../../.sandbox/decision.token')]) {
+    try { if (p && existsSync(p)) { const t = readFileSync(p, 'utf8').trim(); if (t) return t; } } catch { /* try the next place */ }
+  }
+  return undefined;
+}
 
 const BACKEND = process.env.ORCHESTRATOR_URL ?? 'http://127.0.0.1:4317';
 const LOCAL_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?$/;
@@ -35,6 +48,7 @@ async function handle(req: Request, ctx: { params: Promise<{ path: string[] }> }
 
   const headers: Record<string, string> = {};
   for (const h of FORWARD) { const v = req.headers.get(h); if (v) headers[h] = v; }
+  if (req.method === 'POST' && DECISION_PATH.test(path.join('/')) && req.headers.get('sec-fetch-site') !== 'cross-site') { const t = decisionToken(); if (t) headers['x-orch-decision-token'] = t; }
 
   let upstream: Response;
   try { upstream = await fetch(target, { method: req.method, headers, body: body || undefined, signal: req.signal, cache: 'no-store' }); }
