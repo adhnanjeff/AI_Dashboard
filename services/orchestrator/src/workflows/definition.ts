@@ -24,6 +24,8 @@ export interface StepDef {
   blockAt?: Severity;                                // review: findings at or above this severity must be fixed (default high)
   when?: { step: string; status: 'passed' | 'failed' };
   maxAttempts: number;
+  /** Phase 13: stop retrying an agent or review step once its reported spend reaches this. Only reported cost counts. */
+  budgetUsd?: number;
 }
 export interface WorkflowDef { concurrency: number; steps: StepDef[] }
 
@@ -50,6 +52,11 @@ export function validateWorkflow(input: unknown): WorkflowDef {
     const maxAttempts = int(s.maxAttempts, 1, 5, 2); if (Number.isNaN(maxAttempts)) bad.push(`${at}: maxAttempts must be 1..5`);
     const d: StepDef = { id, kind, needs: [...new Set(needs)], maxAttempts: Number.isNaN(maxAttempts) ? 2 : maxAttempts };
     if (typeof s.title === 'string') d.title = s.title.slice(0, 120);
+    if (s.budgetUsd !== undefined) {
+      if (typeof s.budgetUsd !== 'number' || !Number.isFinite(s.budgetUsd) || s.budgetUsd < 0.01 || s.budgetUsd > 100000) bad.push(`${at}: budgetUsd must be a number from 0.01 to 100000`);
+      else if (kind !== 'agent' && kind !== 'review') bad.push(`${at}: budgetUsd applies only to agent and review steps`);
+      else d.budgetUsd = s.budgetUsd;
+    }
     if (s.model !== undefined) { if (typeof s.model === 'string' && (s.model === 'auto' || MODEL.test(s.model))) { if (s.model !== 'auto') d.model = s.model; } else bad.push(`${at}: invalid model`); }
     if (kind === 'agent' || kind === 'review') {
       d.role = String(s.role ?? (kind === 'review' ? 'reviewer' : 'coder'));

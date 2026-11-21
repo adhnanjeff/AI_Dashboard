@@ -20,7 +20,10 @@ import { buildFactorySnapshot } from '../factory/snapshot.ts';
 import { PolicyError, PolicyService, PROTECTED_ACTIONS, type PolicyOptions } from '../policy/policy-service.ts';
 import { ProtectedOps, type CiProvider } from '../policy/protected-ops.ts';
 import { PROFILES, ROLE_PROFILE } from '../policy/profiles.ts';
-import { ROLES, featureTemplate } from '../workflows/definition.ts';
+import { DefinitionError, ROLES, featureTemplate } from '../workflows/definition.ts';
+import { exportWorkflow, parseWorkflowImport, workflowJsonSchema } from '../workflows/portable.ts';
+import { buildAnalytics } from '../analytics/analytics.ts';
+import { AdminError, backupDatabase, exportProject, importProjectMemory, listBackups } from '../admin/backup.ts';
 
 class HttpError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status; } }
 
@@ -70,6 +73,8 @@ export interface ApiOptions {
   protectedBranches?: string[]; separationOfDuties?: boolean;
   /** Where CI / branch-protection status comes from. Default: none configured. */
   ci?: CiProvider;
+  /** Phase 13. Where database backups are written (fixed folder, server-chosen names). Default .sandbox/backups. */
+  backupDir?: string; maxBackups?: number;
 }
 
 // Thin HTTP layer: validates input, calls Store / Supervisor, returns their state. No business logic here.
@@ -370,6 +375,26 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
           evidence: { kind: 'permission', taskId: t.id, profile, grants: PROFILES[profile as keyof typeof PROFILES].grants, why: typeof b.why === 'string' ? b.why.slice(0, 500) : null } })));
       }
 
+      // ---- Phase 13: analytics, backups, project export / import
+      if (m === 'GET' && url.pathname === '/analytics') {
+        const projectId = url.searchParams.get('projectId') ?? undefined; if (projectId) need(store.getProject(projectId), 'project');
+        const a = router.active().policy; const days = Number(url.searchParams.get('days') ?? 30);
+        if (!Number.isFinite(days) || days < 1 || days > 365) throw new HttpError(400, 'days must be 1..365');
+        return send(res, 200, buildAnalytics(store, { projectId, days, estimateUsd: a.budgets.estimateUsd, maxTier: a.escalation.maxTier }));
+      }
+      const backupDir = opts.backupDir ?? '.sandbox/backups';
+      if (m === 'GET' && url.pathname === '/admin/backups') return send(res, 200, { dir: resolve(backupDir), backups: listBackups(backupDir) });
+      if (m === 'POST' && url.pathname === '/admin/backups') {
+        if (listBackups(backupDir).length >= (opts.maxBackups ?? 20)) throw new HttpError(409, `there are already ${opts.maxBackups ?? 20} backups; move or delete old ones in ${resolve(backupDir)} first`);
+        const info = backupDatabase(store, backupDir); store.audit('user', 'admin.backup', info.file, { bytes: info.bytes, schemaVersion: info.schemaVersion });
+        return send(res, 201, info);
+      }
+      if (m === 'GET' && parts[0] === 'projects' && parts[2] === 'export') return send(res, 200, exportProject(store, need(store.getProject(parts[1]), 'project').id));
+      if (m === 'POST' && parts[0] === 'projects' && parts[2] === 'import-memory') {
+        need(store.getProject(parts[1]), 'project'); const b = await readJson(req); const r = importProjectMemory(memory, parts[1], b.file ?? b);
+        store.audit('user', 'admin.import-memory', `project:${parts[1]}`, { imported: r.imported, duplicates: r.duplicates, skipped: r.skipped.length }); return send(res, 200, r);
+      }
+
       // ---- Phase 11: Agent Factory snapshot (read-only, derived from real records)
       if (m === 'GET' && url.pathname === '/factory') {
         const projectId = url.searchParams.get('projectId') ?? undefined; if (projectId) need(store.getProject(projectId), 'project');
@@ -404,6 +429,19 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
       if (parts[0] === 'workflows') {
         if (m === 'GET' && parts.length === 1) return send(res, 200, flows.list(url.searchParams.get('projectId') ?? undefined));
         if (m === 'GET' && parts[1] === 'roles') return send(res, 200, ROLES);
+        if (m === 'GET' && parts[1] === 'schema') return send(res, 200, workflowJsonSchema());
+        if (m === 'POST' && parts[1] === 'validate') {
+          const b = await readJson(req); let input = b.definition ?? b.file;
+          if (input && typeof input === 'object' && 'definition' in input) { try { input = parseWorkflowImport(input).definition; } catch (e) { if (e instanceof DefinitionError) return send(res, 200, { ok: false, problems: e.problems }); throw e; } }
+          const r = flows.check(input); return send(res, 200, r.ok ? { ok: true, problems: [], definition: r.definition, file: exportWorkflow(r.definition, { title: typeof b.title === 'string' ? b.title : undefined, goal: typeof b.goal === 'string' ? b.goal : undefined }) } : { ok: false, problems: r.problems });
+        }
+        if (m === 'POST' && parts[1] === 'import') {
+          const b = await readJson(req); need(store.getProject(str(b.projectId, 'projectId')), 'project');
+          const f = parseWorkflowImport(b.file); const c = flows.check(f.definition); if (!c.ok) throw new HttpError(400, `invalid workflow: ${c.problems.join('; ')}`);
+          const wf = flows.create({ projectId: b.projectId, title: typeof b.title === 'string' && b.title.trim() ? b.title : (f.title ?? 'Imported workflow'), goal: typeof b.goal === 'string' && b.goal.trim() ? b.goal : (f.goal ?? 'Imported workflow'), definition: f.definition, createdBy: 'import' });
+          store.audit('user', 'workflow.imported', wf.id, { steps: f.definition.steps.length }); return send(res, 201, { workflow: wf, warnings: f.warnings });
+        }
+        if (m === 'GET' && parts[2] === 'export') { const g = flows.get(parts[1]); return send(res, 200, exportWorkflow(g.workflow.definition, { title: g.workflow.title, goal: g.workflow.goal })); }
         if (m === 'POST' && parts.length === 1) {
           const b = await readJson(req);
           const definition = b.template && typeof b.template === 'object'
@@ -433,6 +471,8 @@ export function createApi(store: Store, supervisor: Supervisor, opts: ApiOptions
     } catch (e: any) {
       if (e instanceof HttpError || e instanceof MemoryError) return send(res, e.status, { error: e.message });
       if (e instanceof WorktreeError || e instanceof RoutingError || e instanceof ProviderError || e instanceof HandoffError || e instanceof WorkflowError || e instanceof IndexError) return send(res, e.status, { error: e.message, details: e.details });
+      if (e instanceof DefinitionError) return send(res, 400, { error: e.message, problems: e.problems });
+      if (e instanceof AdminError) return send(res, e.status, { error: e.message });
       if (e instanceof PolicyError) return send(res, e.status, { error: e.message, details: e.details });
       if (e instanceof CapacityError) return send(res, 429, { error: e.message });
       if (e instanceof SessionBusyError || e instanceof WorktreeBusyError || e instanceof IdempotencyConflictError || e instanceof WrongWorkdirError) return send(res, 409, { error: e.message });
