@@ -132,3 +132,41 @@ export interface PolicyInfo {
   roleDefaults: Record<string, string>; protectedActions: Record<string, { label: string; risk: string }>;
   decisionTokenRequired: boolean; separationOfDuties: boolean; approvalTtlMs: number; ciConfigured: boolean;
 }
+
+// ---- Phase 13: analytics, workflow files, backups
+export interface AnalyticsInsight { topic: 'cost' | 'escalation' | 'failure' | 'quality' | 'people'; text: string; basis: string }
+export interface Analytics {
+  generatedAt: string; windowDays: number; since: string; projectId: string | null; minSample: number;
+  totals: { runs: number; finished: number; completed: number; failed: number; cancelled: number; reportedRuns: number; unknownCostRuns: number; reportedUsd: number; inputTokens: number; outputTokens: number };
+  cost: {
+    byModel: { model: string; runs: number; completed: number; failed: number; reportedRuns: number; costUsd: number; medianDurationMs: number | null; completionRate: number | null; avgCostPerRunUsd: number | null }[];
+    byDay: { day: string; runs: number; costUsd: number; reportedRuns: number }[];
+  };
+  accepted: {
+    definition: string; units: number; accepted: number; notAccepted: number; acceptanceRate: number | null;
+    costPerAcceptedUsd: number | null; acceptedWithCost: number; costPerAcceptedCompleteUsd: number | null; acceptedWithCompleteCost: number;
+    spendOnNotAcceptedUsd: number; notAcceptedWithCost: number;
+    byKind: { kind: 'workflow' | 'session'; units: number; accepted: number; costPerAcceptedUsd: number | null; acceptedWithCost: number; medianRunsPerAccepted: number | null }[];
+    recent: { kind: 'workflow' | 'session'; id: string; title: string; status: string; accepted: boolean; runs: number; reportedRuns: number; costUsd: number | null; at: string }[];
+  };
+  routing: {
+    decisions: number; byTier: { tier: string; decisions: number }[]; escalated: number; escalationRate: number | null; transitions: { path: string; decisions: number }[];
+    escalatedRunsFinished: number; escalatedRunsCompleted: number; escalatedSuccessRate: number | null; escalatedCostUsd: number; escalatedCostRuns: number;
+    tasksWithRetries: number; extraRuns: number; tasksRecoveredByRetry: number; refusedByRetryLimit: number; workflowRetries: number; workflowRetryLimitsHit: number;
+    savings: { basis: string; ceilingTier: string; runsOnCheaperTier: number; estimatedUsd: number } | null;
+  };
+  reliability: {
+    failureRate: number | null; failuresByCause: { cause: string; runs: number }[]; checkpointsSaved: number; checkpointsFailed: number; resumes: number;
+    resumedSessions: number; resumedThenCompleted: number; recoveryRate: number | null; orphaned: number; handoffs: number; handoffsRefused: number;
+  };
+  time: { runMedianMs: number | null; runP90Ms: number | null; runsTimed: number; sessionMedianMs: number | null; sessionsTimed: number; workflowMedianMs: number | null; workflowsTimed: number };
+  humans: {
+    approvalsRequested: number; approved: number; rejected: number; pending: number; medianWaitMs: number | null; p90WaitMs: number | null;
+    byAction: { action: string; requested: number; approved: number; rejected: number; pending: number; medianWaitMs: number | null }[];
+    acceptedNeedingAPerson: number; acceptedWithoutAPerson: number; firstAttemptAccepted: number; firstAttemptRate: number | null; resumes: number;
+  };
+  insights: AnalyticsInsight[];
+}
+export interface WorkflowCheck { ok: boolean; problems: string[]; definition?: any; file?: any }
+export interface BackupInfo { file: string; path: string; bytes: number; createdAt: string; schemaVersion: number; integrity: string; tables: Record<string, number> }
+export interface ImportReport { imported: number; duplicates: number; skipped: { index: number; reason: string }[]; limit: number }

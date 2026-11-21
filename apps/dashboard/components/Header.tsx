@@ -13,8 +13,10 @@ const NAV = [
   { href: '/workflows', label: 'Workflows', icon: 'M6 3v12M18 9v12M6 15a3 3 0 1 0 0 .01M18 9a3 3 0 1 0 0-.01' },
   { href: '/graph', label: 'Code graph', icon: 'M12 5v6M12 11l-6 6M12 11l6 6M12 3.5a1.5 1.5 0 1 0 0 .01M5 19a1.5 1.5 0 1 0 0 .01M19 19a1.5 1.5 0 1 0 0 .01' },
   { href: '/approvals', label: 'Approvals', icon: 'M9 12l2 2 4-4M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' },
+  { href: '/analytics', label: 'Analytics', icon: 'M3 3v18h18M7 15l4-5 3 3 5-7' },
   { href: '/usage', label: 'Usage', icon: 'M4 20V10M10 20V4M16 20v-7M22 20H2' },
   { href: '/providers', label: 'Providers', icon: 'M3 5h18v6H3zM3 13h18v6H3zM7 8h.01M7 16h.01' },
+  { href: '/data', label: 'Data', icon: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6' },
 ];
 
 /** Top bar: brand, main navigation, new-session action and theme. */

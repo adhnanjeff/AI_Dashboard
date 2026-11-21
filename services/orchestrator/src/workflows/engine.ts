@@ -82,6 +82,14 @@ export class WorkflowEngine {
   }
 
   // ------------------------------------------------------------------ public API
+  /** Phase 13: everything create() would refuse, without creating anything. Powers the editor and file import. */
+  check(input: unknown): { ok: true; definition: WorkflowDef; problems: [] } | { ok: false; definition: null; problems: string[] } {
+    let def: WorkflowDef;
+    try { def = validateWorkflow(input); } catch (e) { if (e instanceof DefinitionError) return { ok: false, definition: null, problems: e.problems }; throw e; }
+    const problems: string[] = [];
+    for (const s of def.steps) if (s.kind === 'check') { try { assertCommandAllowed(s.command!, this.allowed); } catch (e: any) { problems.push(`step "${s.id}": ${e.message}`); } }
+    return problems.length ? { ok: false, definition: null, problems } : { ok: true, definition: def, problems: [] };
+  }
   create(i: { projectId: string; title: string; goal: string; definition: unknown; createdBy?: string }): WorkflowRow {
     if (!this.store.getProject(i.projectId)) throw new WorkflowError(404, 'project not found');
     let def: WorkflowDef;
@@ -236,7 +244,23 @@ export class WorkflowEngine {
     return this.failStep(w, d, s, `could not start: ${e.message}`, { halt: true });
   }
 
+  /** Phase 13: what one step has cost so far across its attempts. Only reported cost counts; a run that reported none adds nothing. */
+  stepSpend(wfId: string, key: string): number {
+    let total = 0;
+    for (const e of this.q.all<any>(`SELECT content FROM workflow_evidence WHERE workflow_id=? AND step_key=? AND kind='run'`, wfId, key)) {
+      try { const c = JSON.parse(e.content); if (typeof c.costUsd === 'number') total += c.costUsd; } catch { /* unreadable evidence adds nothing */ }
+    }
+    return total;
+  }
+  private overBudget(w: WorkflowRow, d: StepDef, s: StepState): boolean {
+    if (d.budgetUsd === undefined) return false;
+    const spent = this.stepSpend(w.id, d.id); if (spent < d.budgetUsd) return false;
+    this.failStep(w, d, s, `step budget reached: $${spent.toFixed(4)} reported of $${d.budgetUsd} allowed for "${d.id}" (only reported cost is counted)`, { halt: true });
+    return true;
+  }
+
   private beginAgent(w: WorkflowRow, d: StepDef, s: StepState, _steps: Map<string, StepState>) {
+    if (this.overBudget(w, d, s)) return;
     const attempt = s.attempts + 1;
     const session = this.store.createSession({ projectId: w.projectId, title: `${w.title}: ${d.id}${attempt > 1 ? ` (attempt ${attempt})` : ''}` });
     let wt; try { wt = this.worktrees.create(session.id, s.detail.branch); } catch (e: any) { return this.launchFailure(w, d, s, e); }
@@ -295,6 +319,7 @@ export class WorkflowEngine {
 
   // ---- review steps
   private beginReview(w: WorkflowRow, d: StepDef, s: StepState, steps: Map<string, StepState>) {
+    if (this.overBudget(w, d, s)) return;
     const target = steps.get(d.reviews!)!; const path = target.detail.workspace as string; const attempt = s.attempts + 1;
     if (!path) return this.failStep(w, d, s, `the step it reviews ("${d.reviews}") has no workspace`);
     const session = this.store.createSession({ projectId: w.projectId, title: `${w.title}: ${d.id}${attempt > 1 ? ` (attempt ${attempt})` : ''}` });

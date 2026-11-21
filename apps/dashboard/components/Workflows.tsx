@@ -52,7 +52,7 @@ export default function Workflows() {
       <ErrorBanner error={list.data ? null : list.error} what="workflows" />
 
       <section className="card" aria-labelledby="wf-list">
-        <h2 id="wf-list">Your workflows</h2>
+        <div className="row spread"><h2 id="wf-list">Your workflows</h2><Link href="/workflows/editor" className="btn">Open the editor</Link></div>
         {rows.length === 0 ? <p className="muted">None yet. Describe a feature below to create one.</p> : (
           <table className="data">
             <thead><tr><th scope="col">Workflow</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Updated</th></tr></thead>

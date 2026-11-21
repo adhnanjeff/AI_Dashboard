@@ -36,7 +36,7 @@ export default function WorkflowView({ id }: { id: string }) {
           </div>
         </div>
         <p className="sub">{w.goal}</p>
-        <p className="muted small" style={{ margin: 0 }}><Link href="/workflows">← All workflows</Link> · up to {w.definition.concurrency} steps at once · started by {w.createdBy} · <a href={`/api/workflows/${id}/record`} target="_blank" rel="noreferrer">Full audit record (JSON)</a></p>
+        <p className="muted small" style={{ margin: 0 }}><Link href="/workflows">← All workflows</Link> · up to {w.definition.concurrency} steps at once · started by {w.createdBy} · <a href={`/api/workflows/${id}/record`} target="_blank" rel="noreferrer">Full audit record (JSON)</a> · <a href={`/api/workflows/${id}/export`} download={`${w.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.workflow.json`}>Export definition</a> · <Link href={`/workflows/editor?from=${id}`}>Edit as new</Link></p>
       </div>
       <ErrorBanner error={wf.data ? null : wf.error} what="this workflow" />
       {error && <div className="banner bad" role="alert">{error}</div>}
